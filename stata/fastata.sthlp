@@ -93,7 +93,8 @@ integer result types that the values do not fit; options {cmd:autotype}, {cmd:la
 {cmd:nquantiles()} above 1001, and weighted percentiles within rounding distance of a
 cumulative weight{p_end}
 {p2col:{helpb destring}}non-ASCII values, values Stata reads as hexadecimal numbers,
-numbers longer than 64 characters or beyond Stata's range{p_end}
+numbers longer than 64 characters or beyond Stata's range, calls under {cmd:version} 10 or
+older{p_end}
 {p2col:{helpb tostring}}{cmd:usedisplayformat}, formats other than {cmd:%}{it:W}{cmd:.0g}
 and {cmd:%}{it:W}{cmd:.0f}, and non-integer values{p_end}
 {p2colreset}{...}

@@ -5,9 +5,9 @@
 //!
 //! `destring "phase=compute"`: varlist = the string variables of the user's varlist, in order.
 //! Keys `threads`, `force`, `float`, `percent`, `dpcomma` (0/1), `ign` (the character codes of
-//! `ignore()`, in order, separated by spaces; may be empty) and `raw` (0/1, calibration only).
-//! For each variable j (1-based) it runs what `destring.ado` does: remove the ignored characters,
-//! `ustrtrim()`, count the missing-looking values, `dpcomma`, collapse leading zeros, `real()`,
+//! `ignore()`, in order, separated by spaces; may be empty), `old` (0/1: the caller is older than
+//! 14) and `raw` (0, 1 or 2, calibration only). For each variable j (1-based) it runs what
+//! `destring.ado` does: remove the ignored characters, `ustrtrim()` (`strtrim()` with `old`), count the missing-looking values, `dpcomma`, collapse leading zeros, `real()`,
 //! round to float with `float`; the variable converts unless some value that does not look
 //! missing gives missing and `force` is off. A converting variable is divided by 100 when
 //! `percent` is on and its first ignored `%` was found, then gets `compress`'s type. Sets locals
@@ -22,7 +22,8 @@
 //! Falls back (all or nothing) for a non-ASCII value [non-ASCII] and for values outside the
 //! calibrated classes of [`real::real`] and [`real::to_float`]. With `raw=1` (calibration C3) it
 //! applies only `real()` (and the float rounding with `float=1`) and caches two columns per
-//! variable: the value, and 1 where the emulation would fall back (value `.` there).
+//! variable: the value, and 1 where the emulation would fall back (value `.` there). `raw=2` does
+//! the same after [`real::prep`] (calibration C3p).
 //!
 //! `tostring "phase=compute"`: varlist = the numeric variables to convert. Keys `threads`, `fmt`
 //! (`g` or `f`) and `width` (W of `%W.0g` / `%W.0f`). Caches one string column per variable
@@ -50,7 +51,10 @@ pub struct DestringOpts {
     pub percent: bool,
     pub dpcomma: bool,
     pub ignore: Vec<u8>,
-    pub raw: bool,
+    /// The caller is older than 14 (`strtrim()` and `regexr()` in destring.ado).
+    pub old: bool,
+    /// Calibration output: 0 off, 1 `real()` only, 2 [`real::prep`] then `real()`.
+    pub raw: u8,
 }
 
 /// Per-variable result of the destring compute phase.
@@ -114,7 +118,13 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
             let mut t = Vec::new();
             for r in 0..m {
                 let s = &buf[off[first + r]..off[first + r + 1]];
-                if o.raw {
+                if o.raw > 0 {
+                    let s = if o.raw == 2 {
+                        real::prep(s, &o.ignore, o.dpcomma, o.old, &mut t);
+                        &t[..]
+                    } else {
+                        s
+                    };
                     let v = real::real(s, miss).and_then(|v| if o.float { real::to_float(v, miss) } else { Ok(v) });
                     // NaN marks a value the emulation would fall back for
                     p.vals[r] = v.unwrap_or(f64::NAN);
@@ -126,7 +136,7 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
                         p.found[k] = true;
                     }
                 }
-                let ismissing = real::prep(s, &o.ignore, o.dpcomma, &mut t);
+                let ismissing = real::prep(s, &o.ignore, o.dpcomma, o.old, &mut t);
                 let mut v = real::real(&t, miss).map_err(fb)?;
                 if o.float {
                     v = real::to_float(v, miss).map_err(fb)?;
@@ -148,7 +158,7 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
             oldmiss += p.oldmiss;
             newmiss += p.newmiss;
         }
-        if o.raw {
+        if o.raw > 0 {
             let flags: Vec<f64> = vals.iter().map(|v| if v.is_nan() { 1.0 } else { 0.0 }).collect();
             vals.iter_mut().for_each(|v| {
                 if v.is_nan() {
@@ -208,7 +218,7 @@ fn ignore_codes(s: &str) -> Res<Vec<u8>> {
 
 /// The `destring` command (see the module documentation).
 pub fn run_destring<I: Io>(io: &I, a: &Args) -> Res<()> {
-    a.only(&["phase", "threads", "force", "float", "percent", "dpcomma", "ign", "raw"])?;
+    a.only(&["phase", "threads", "force", "float", "percent", "dpcomma", "ign", "old", "raw"])?;
     if a.str_req("phase")? != "compute" {
         return Err(Error::syntax("fastata plugin: destring supports phase=compute only"));
     }
@@ -219,7 +229,11 @@ pub fn run_destring<I: Io>(io: &I, a: &Args) -> Res<()> {
         percent: a.flag_or("percent", false)?,
         dpcomma: a.flag_or("dpcomma", false)?,
         ignore: ignore_codes(a.str_opt("ign").unwrap_or(""))?,
-        raw: a.flag_or("raw", false)?,
+        old: a.flag_or("old", false)?,
+        raw: match a.usize_or("raw", 0)? {
+            r @ 0..=2 => r as u8,
+            _ => return Err(Error::syntax("fastata plugin: bad argument `raw`")),
+        },
     };
     let (out, infos) = destring_compute(io, &o)?;
     for (j, v) in infos.iter().enumerate() {
@@ -329,7 +343,7 @@ mod tests {
                 cur.retain(|b| b != c);
             }
             let mut t = Vec::new();
-            om += usize::from(real::prep(&cur, &[], o.dpcomma, &mut t));
+            om += usize::from(real::prep(&cur, &[], o.dpcomma, o.old, &mut t));
             let mut v = real::real(&t, MISS).unwrap();
             if o.float {
                 v = real::to_float(v, MISS).unwrap();
@@ -342,7 +356,7 @@ mod tests {
 
     fn random_strings(n: usize, seed: u64) -> Vec<String> {
         let mut rng = Rng::new(seed);
-        let junk = ["NA", "-", "", ".", ".a", " .z ", "$1,234", "12%", "1,5", "007", "1e3", "x", "  42  "];
+        let junk = ["NA", "-", "", ".", ".a", " .z ", "$1,234", "12%", "1,5", "007", "1e3", "x", "  42  ", "\t5", " 0012\n", "\t.b"];
         (0..n)
             .map(|_| {
                 let u = rng.unif();
@@ -364,8 +378,16 @@ mod tests {
         let b: Vec<String> = (0..n).map(|i| format!("{}", i as i64 - 100)).collect();
         let cols = vec![a.iter().map(String::as_str).collect::<Vec<_>>(), b.iter().map(String::as_str).collect()];
         let io = strvar_io(&cols);
-        for (force, float, ign, dp) in [(true, false, "", false), (false, false, "", false), (true, true, "$,%", false), (true, false, "", true)] {
-            let o1 = DestringOpts { threads: 1, force, float, ignore: ign.as_bytes().to_vec(), dpcomma: dp, ..Default::default() };
+        let cases = [
+            (true, false, "", false, false),
+            (false, false, "", false, false),
+            (true, true, "$,%", false, false),
+            (true, false, "", true, false),
+            (true, false, "", false, true),
+            (true, true, "$ ", true, true),
+        ];
+        for (force, float, ign, dp, old) in cases {
+            let o1 = DestringOpts { threads: 1, force, float, ignore: ign.as_bytes().to_vec(), dpcomma: dp, old, ..Default::default() };
             let (out1, inf1) = destring_compute(&io, &o1).unwrap();
             let o8 = DestringOpts { threads: 8, ..o1.clone() };
             let (out8, inf8) = destring_compute(&io, &o8).unwrap();
@@ -421,7 +443,7 @@ mod tests {
     #[test]
     fn destring_raw_marks_fallback_values() {
         let io = strvar_io(&[vec!["1", "1.0x+1", "1e308", ".c"]]);
-        let o = DestringOpts { raw: true, ..Default::default() };
+        let o = DestringOpts { raw: 1, ..Default::default() };
         let (out, _) = destring_compute(&io, &o).unwrap();
         assert_eq!(out.nums[1], vec![0.0, 1.0, 1.0, 0.0]);
         assert_eq!(out.nums[0][0], 1.0);

@@ -1,9 +1,10 @@
 *! version 0.1.0  Leo Liu  15oct2026
-*! _fx_destring: fastata's destring. The fast path (caller 14 or later) converts every string
+*! _fx_destring: fastata's destring. The fast path (caller 11 or later) converts every string
 *! variable in the plugin (src/strnum: the calibrated emulations of what destring.ado 2.4.4 does
 *! before and in real(), and of compress), then runs destring.ado's own commands and messages on
-*! the new variables. Everything else, and any value outside the calibrated classes, runs the
-*! original.
+*! the new variables. Callers 11-13 get destring.ado's older branch (the old ignore() parsing,
+*! strtrim() and regexr(), "bytes" in the messages; calibration C3p). Everything else (callers
+*! before 11), and any value outside the calibrated classes, runs the original.
 program _fx_destring
 	local caller = _caller()
 	local rc0 = c(rc)
@@ -11,7 +12,7 @@ program _fx_destring
 	_fx gate destring
 	if `fx_ok' {
 		local fx_why
-		if `caller' < 14 local fx_why caller
+		if `caller' < 11 local fx_why caller
 		else {
 			* the original's parsing and error checks; any error runs the original, which
 			* reports it
@@ -27,7 +28,7 @@ program _fx_destring
 			}
 			if "`strvars'" != "" {
 				_fx threads
-				_fx_call `strvars', destring "phase=compute" "threads=`fx_threads'" "force=`=("`force'"!="")'" "float=`=("`float'"!="")'" "percent=`=("`percent'"!="")'" "dpcomma=`=("`dpcomma'"!="")'" "ign=`codes'"
+				_fx_call `strvars', destring "phase=compute" "threads=`fx_threads'" "force=`=("`force'"!="")'" "float=`=("`float'"!="")'" "percent=`=("`percent'"!="")'" "dpcomma=`=("`dpcomma'"!="")'" "ign=`codes'" "old=`=(`caller' < 14)'"
 				if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 				else if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			}
@@ -196,19 +197,28 @@ program Parse
 	syntax [varlist], [Generate(string) replace] [force] [float] ///
 	  [Ignore(string asis)] [percent] [dpcomma]
 
-	if ustrpos(`"`ignore'"',",") & ///
-	  !ustrpos(`"`ignore'"',`"""')  { // " required if , used
-		exit 198
+	if _caller() >= 14 {
+		if ustrpos(`"`ignore'"',",") & ///
+		  !ustrpos(`"`ignore'"',`"""')  { // " required if , used
+			exit 198
+		}
 	}
 
 	`verpre' _parse_ignore `ignore'
-	if `"`s(ignore)'"'!="" {
-		local ignore `"`s(ignore)'"'
+	if _caller() < 14 {
+		local aschars 0
+		syntax [varlist], [Generate(string) replace] [force] [float] ///
+		  [Ignore(string)] [percent] [dpcomma]
 	}
-	local aschars `s(aschars)'
-	if `s(illegal)' {
-		c_local fx_why ignore
-		exit
+	else {
+		if `"`s(ignore)'"'!="" {
+			local ignore `"`s(ignore)'"'
+		}
+		local aschars `s(aschars)'
+		if `s(illegal)' {
+			c_local fx_why ignore
+			exit
+		}
 	}
 
 	if "`percent'" == "percent" {

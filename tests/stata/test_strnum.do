@@ -181,13 +181,87 @@ ts "destring a, replace" fast destring small
 ts "destring a, gen(z) float" fast destring small
 ts "destring a b, replace" fast destring tiny
 
+* ---------------------------------------------------------------- destring, callers 11-13
+* (strtrim() instead of ustrtrim(), regexr() instead of ustrregexrf(), the old ignore() parsing
+* and "bytes" in the messages)
+ts "version 11: destring sa, replace" fast destring
+ts "version 11: destring sa sb sl2, gen(n1 n2 n3)" fast destring
+ts "version 11: destring sw, replace" fast destring
+ts "version 11: destring sw, gen(nw) force" fast destring
+ts "version 11: destring s0, replace" fast destring
+ts "version 11: destring sm, replace" fast destring
+ts "version 11: destring sm, gen(nm) force float" fast destring
+ts "version 11: destring sn, replace force" fast destring
+ts "version 11: destring se, gen(ne)" fast destring
+ts `"version 11: destring sc, gen(nc) ignore("$,")"' fast destring
+ts "version 11: destring sc, replace ignore($,)" fast destring
+ts `"version 11: destring sc, replace ignore("$ ,") force"' fast destring
+ts "version 11: destring si, replace ignore( )" fast destring
+ts `"version 11: destring si, replace ignore(" ")"' fast destring
+ts "version 11: destring sp, replace percent" fast destring
+ts "version 11: destring sd, gen(nd) dpcomma force" fast destring
+ts `"version 11: destring sn, gen(nn) ignore("NA-") force"' fast destring
+ts "version 11: destring sr slr, gen(nr nlr) force" fast destring
+ts "version 11: destring sk, replace" fast destring
+ts "version 11: destring id sa, replace" fast destring
+ts "version 12: destring sa, replace" fast destring
+ts "version 12: destring sa sb sl2, gen(n1 n2 n3)" fast destring
+ts "version 12: destring sw, replace" fast destring
+ts "version 12: destring sw, gen(nw) force" fast destring
+ts "version 12: destring s0, replace" fast destring
+ts "version 12: destring sm, replace" fast destring
+ts "version 12: destring sm, gen(nm) force float" fast destring
+ts "version 12: destring sn, replace force" fast destring
+ts "version 12: destring se, gen(ne)" fast destring
+ts `"version 12: destring sc, gen(nc) ignore("$,")"' fast destring
+ts "version 12: destring sc, replace ignore($,)" fast destring
+ts `"version 12: destring sc, replace ignore("$ ,") force"' fast destring
+ts "version 12: destring si, replace ignore( )" fast destring
+ts `"version 12: destring si, replace ignore(" ")"' fast destring
+ts "version 12: destring sp, replace percent" fast destring
+ts "version 12: destring sd, gen(nd) dpcomma force" fast destring
+ts `"version 12: destring sn, gen(nn) ignore("NA-") force"' fast destring
+ts "version 12: destring sr slr, gen(nr nlr) force" fast destring
+ts "version 12: destring sk, replace" fast destring
+ts "version 12: destring id sa, replace" fast destring
+ts "version 13: destring sa, replace" fast destring
+ts "version 13: destring sa sb sl2, gen(n1 n2 n3)" fast destring
+ts "version 13: destring sw, replace" fast destring
+ts "version 13: destring sw, gen(nw) force" fast destring
+ts "version 13: destring s0, replace" fast destring
+ts "version 13: destring sm, replace" fast destring
+ts "version 13: destring sm, gen(nm) force float" fast destring
+ts "version 13: destring sn, replace force" fast destring
+ts "version 13: destring se, gen(ne)" fast destring
+ts `"version 13: destring sc, gen(nc) ignore("$,")"' fast destring
+ts "version 13: destring sc, replace ignore($,)" fast destring
+ts `"version 13: destring sc, replace ignore("$ ,") force"' fast destring
+ts "version 13: destring si, replace ignore( )" fast destring
+ts `"version 13: destring si, replace ignore(" ")"' fast destring
+ts "version 13: destring sp, replace percent" fast destring
+ts "version 13: destring sd, gen(nd) dpcomma force" fast destring
+ts `"version 13: destring sn, gen(nn) ignore("NA-") force"' fast destring
+ts "version 13: destring sr slr, gen(nr nlr) force" fast destring
+ts "version 13: destring sk, replace" fast destring
+ts "version 13: destring id sa, replace" fast destring
+ts "version 13: destring sa, replace" fast destring bsort
+ts `"version 13: destring sc, gen(nc) ignore("$,%NA") percent"' fast destring
+ts `"version 12: destring sc sp, replace ignore("$,% ")"' fast destring
+ts "version 12: destring a b, replace" fast destring tiny
+
 * ---------------------------------------------------------------- destring, fallbacks
 ts "destring sh, replace" fallback destring
 ts "destring su, replace force" fallback destring
 ts "destring so, replace" fallback destring
 ts "destring slnum, replace" fallback destring
 ts "destring sbf, replace float" fallback destring
-ts "version 13: destring sa, replace" fallback destring
+ts "version 10: destring sa, replace" fallback destring
+ts "version 9: destring sw, replace force" fallback destring
+ts `"version 13: destring sc, replace ignore("$", aschars)"' fallback destring
+ts `"version 12: destring sc, replace ignore("$", illegal)"' fallback destring
+ts `"version 13: destring sc, replace ignore("é")"' fallback destring
+ts "version 11: destring sh, replace" fallback destring
+ts "version 13: destring su, replace force" fallback destring
 ts "destring sa" fallback destring
 ts "destring sa, gen(x) replace" fallback destring
 ts "destring sa, gen(id)" fallback destring
