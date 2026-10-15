@@ -396,6 +396,13 @@ static void test_stale_token(void) {
     pass("stale token gives r(9999)");
 }
 
+/* ---------------------------------------------------------------- per-command cases */
+
+#include "mock_egen.c"
+#include "mock_dup.c"
+#include "mock_quant.c"
+#include "mock_strnum.c"
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr, "usage: mockhost <fastata plugin>\n");
@@ -408,6 +415,10 @@ int main(int argc, char **argv) {
     test_selftest();
     test_cachetest();
     test_stale_token();
+    tests_egen();
+    tests_dup();
+    tests_quant();
+    tests_strnum();
     test_bad_argument();
     test_unknown_command();
     printf("%s: %d failed\n", fails ? "MOCKHOST FAILED" : "MOCKHOST PASSED", fails);
