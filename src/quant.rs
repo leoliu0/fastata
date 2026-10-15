@@ -112,6 +112,7 @@ pub fn pctile(xs: &[f64], p: f64) -> f64 {
 }
 
 /// The k-th percentile of `_pctile, n(nq)` under the default definition (P = n*k/nq).
+#[cfg(test)]
 pub fn pctile_nq(xs: &[f64], k: usize, nq: usize) -> f64 {
     need_default(xs.len(), Pos::Nq(k, nq)).value(|r| xs[r - 1])
 }
@@ -132,6 +133,7 @@ pub fn pctile_altdef(xs: &[f64], p: f64) -> f64 {
 }
 
 /// The k-th percentile of `_pctile, n(nq) altdef`.
+#[cfg(test)]
 pub fn pctile_altdef_nq(xs: &[f64], k: usize, nq: usize) -> f64 {
     need_altdef(xs.len(), Pos::Nq(k, nq)).value(|r| xs[r - 1])
 }
@@ -193,6 +195,7 @@ impl Weighted {
         Weighted { runs, total: cum, noise }
     }
 
+    #[cfg(test)]
     pub fn total(&self) -> f64 {
         self.total
     }
