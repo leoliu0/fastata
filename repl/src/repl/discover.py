@@ -144,7 +144,9 @@ def dv_judge(d: dict[str, Any]) -> tuple[str, str, int]:
     return "skip", "no Stata do-file", size
 
 
-def discover_dataverse(refresh: bool = False, workers: int = 8, log=print) -> list[Candidate]:
+def discover_dataverse(refresh: bool = False, deep: bool = False, workers: int = 2, log=print) -> list[Candidate]:
+    """Every dataset of the collections. Its file list is judged when its metadata is cached or
+    deep is set (one request per dataset, rate-limited); otherwise it is judged by fetch."""
     hits: list[tuple[str, dict[str, Any]]] = []
     for alias, journal in DV_ALIASES.items():
         items = dv_search(alias)
@@ -156,12 +158,18 @@ def discover_dataverse(refresh: bool = False, workers: int = 8, log=print) -> li
         gid = it["global_id"]
         date = it.get("published_at", "")
         c = Candidate("dataverse", dv_short(gid), gid.removeprefix("doi:"), journal, date[:4],
-                      it.get("name", ""), 0, "skip", "", date, it.get("url", ""))
+                      it.get("name", ""), 0, "ok", "unchecked", date, it.get("url", ""))
+        if it.get("fileCount") == 0:
+            c.status, c.reason = "skip", "no files"
+            return c
+        cached = (paths.cache_dir() / "dataverse" / f"{dv_short(gid)}.json").exists()
+        if not (cached or deep):
+            return c
         try:
             st, why, size = dv_judge(dv_dataset_json(gid, refresh))
             c.status, c.reason, c.size_bytes = st, why, size
-        except Exception as e:  # noqa: BLE001 - recorded per candidate
-            c.reason = f"metadata error: {e}"
+        except Exception as e:  # noqa: BLE001 - judged again by fetch
+            c.reason = f"unchecked (metadata error: {e})"[:200]
         return c
 
     with ThreadPoolExecutor(workers) as ex:
@@ -276,14 +284,14 @@ def discover_aea(log=print) -> list[Candidate]:
 # ------------------------------------------------------------------------------- command
 
 
-def discover(sources: list[str], refresh: bool = False, log=print) -> list[Candidate]:
+def discover(sources: list[str], refresh: bool = False, deep: bool = False, log=print) -> list[Candidate]:
     old = read_candidates()
     keep = [c for c in old if c.source not in sources]
     new: list[Candidate] = []
     for s in sources:
         try:
             if s == "dataverse":
-                new += discover_dataverse(refresh, log=log)
+                new += discover_dataverse(refresh, deep, log=log)
             elif s == "zenodo":
                 new += discover_zenodo(log=log)
             elif s == "aea":
@@ -295,5 +303,6 @@ def discover(sources: list[str], refresh: bool = False, log=print) -> list[Candi
     allc.sort(key=lambda c: c.date, reverse=True)
     write_candidates(allc)
     nok = sum(c.status == "ok" for c in allc)
-    log(f"candidates: {len(allc)} ({nok} ok) -> {paths.candidates_csv()}")
+    nun = sum(c.status == "ok" and c.reason.startswith("unchecked") for c in allc)
+    log(f"candidates: {len(allc)} ({nok} ok, of which {nun} not yet checked) -> {paths.candidates_csv()}")
     return allc

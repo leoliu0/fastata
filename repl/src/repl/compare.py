@@ -57,6 +57,7 @@ NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 def normalize(text: str, run_root: str) -> str:
     text = text.replace("\r\n", "\n")
+    text = re.sub(r"\n> ", "", text)  # Stata's continuation of long command lines
     if run_root:
         text = text.replace(run_root, "<RUN>")
     text = re.sub(r"arm_[ABF]\b", "arm_X", text)

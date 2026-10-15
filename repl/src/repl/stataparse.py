@@ -98,7 +98,7 @@ def do_targets(text: str) -> list[str]:
     return out
 
 
-MASTER_NAME = re.compile(r"^(main|master|run_?all|0+_?master|00_?run)\.do$", re.I)
+MASTER_NAME = re.compile(r"master|main|run_?all|replicat|^0+_?run", re.I)
 
 
 def _readme_text(root: Path) -> str:
@@ -109,36 +109,61 @@ def _readme_text(root: Path) -> str:
     return "\n".join(texts)
 
 
+def call_reach(dofiles: list[Path]) -> dict[Path, int]:
+    """Number of do-files each do-file runs, directly or through others (matched by file stem)."""
+    by_stem: dict[str, list[Path]] = {}
+    for p in dofiles:
+        by_stem.setdefault(p.stem.lower(), []).append(p)
+    calls: dict[Path, set[Path]] = {}
+    for p in dofiles:
+        out: set[Path] = set()
+        for t in do_targets(read_text(p)):
+            stem = Path(t.replace("\\", "/").rstrip("/")).name
+            stem = stem[:-3] if stem.lower().endswith(".do") else stem
+            out.update(q for q in by_stem.get(stem.lower(), []) if q != p)
+        calls[p] = out
+    reach = {}
+    for p in dofiles:
+        seen: set[Path] = set()
+        stack = list(calls[p])
+        while stack:
+            q = stack.pop()
+            if q not in seen and q != p:
+                seen.add(q)
+                stack.extend(calls[q])
+        reach[p] = len(seen)
+    return reach
+
+
 def find_master(root: Path, dofiles: list[Path] | None = None) -> tuple[Path | None, str]:
-    """(master do-file, how it was found)."""
+    """(master do-file, how it was found): the do-file named in the README's instructions to
+    replicators that runs the most others, else the one that runs the most do-files (directly or
+    through others; a master-like name breaks ties), else a lone or master-like do-file."""
     dofiles = dofiles if dofiles is not None else sorted(p for p in root.rglob("*.do") if p.is_file())
     if not dofiles:
         return None, "no do-files"
+    reach = call_reach(dofiles)
     by_name: dict[str, list[Path]] = {}
     for p in dofiles:
         by_name.setdefault(p.name.lower(), []).append(p)
-    # 1. README: the section with instructions to replicators names the file to run
     readme = _readme_text(root)
     m = re.search(r"instructions\s+(?:to|for)\s+replicators(.*)", readme, re.I | re.S)
     if m:
-        sect = m.group(1)[:6000]
-        for name in re.findall(r"([A-Za-z0-9_\-. ]+?\.do)\b", sect):
-            cands = by_name.get(Path(name.strip()).name.lower())
-            if cands:
-                return min(cands, key=lambda p: len(p.parts)), "README instructions"
-    # 2. conventional names (shallowest first)
-    named = [p for p in dofiles if MASTER_NAME.match(p.name)]
-    if named:
-        return min(named, key=lambda p: (len(p.parts), p.name.lower())), "file name"
-    # 3. the do-file that runs the most other do-files
-    stems = {p.stem.lower() for p in dofiles}
-    best, nbest = None, 0
-    for p in dofiles:
-        n = sum(1 for t in do_targets(read_text(p)) if Path(t.replace("\\", "/")).stem.lower() in stems)
-        if n > nbest or (n == nbest and n and best is not None and len(p.parts) < len(best.parts)):
-            best, nbest = p, n
-    if best is not None:
-        return best, f"runs {nbest} do-files"
+        named = []
+        for name in re.findall(r"([A-Za-z0-9_\-.]+\.do)\b", m.group(1)[:6000]):
+            named += by_name.get(name.lower(), [])
+        if named:
+            best = max(named, key=lambda p: (reach[p], -named.index(p)))
+            return best, "README instructions"
+
+    def key(p: Path):
+        return (-reach[p], 0 if MASTER_NAME.search(p.stem) else 1, len(p.parts), p.name.lower())
+
+    best = min(dofiles, key=key)
+    if reach[best] > 0:
+        return best, f"runs {reach[best]} do-files"
     if len(dofiles) == 1:
         return dofiles[0], "only do-file"
+    if MASTER_NAME.search(best.stem):
+        return best, "file name"
     return None, "no master found"

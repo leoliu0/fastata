@@ -14,7 +14,16 @@ import requests
 USER_AGENT = "fastata-repl/0.1 (+https://github.com/leoliu0/fastata)"
 
 # Requests per minute per host (Zenodo's anonymous limit is 60/min, searches 30/min).
-RATE = {"zenodo.org": 50, "api.datacite.org": 100}
+# Harvard Dataverse's load balancer answers 403 for a while after bursts (seen at ~1500/min).
+RATE = {"zenodo.org": 50, "api.datacite.org": 100, "dataverse.harvard.edu": 40}
+
+
+def _throttled(r: requests.Response) -> bool:
+    """429, or the HTML 403 an AWS load balancer sends while it throttles a client."""
+    if r.status_code == 429:
+        return True
+    return (r.status_code == 403 and "awselb" in r.headers.get("Server", "")
+            and "text/html" in r.headers.get("Content-Type", ""))
 
 
 class _Limiter:
@@ -67,9 +76,9 @@ def get(url: str, *, params=None, stream=False, tries=6, timeout=120, sess=None)
             time.sleep(delay)
             delay *= 2
             continue
-        if r.status_code == 429 or r.status_code >= 500:
+        if _throttled(r) or r.status_code >= 500:
             ra = r.headers.get("Retry-After")
-            wait = float(ra) if ra and ra.isdigit() else delay
+            wait = float(ra) if ra and ra.isdigit() else max(delay, 60.0 if r.status_code == 403 else 0.0)
             r.close()
             last = requests.HTTPError(f"{r.status_code} for {url}")
             time.sleep(min(wait, 120))

@@ -129,6 +129,14 @@ def run(target: int, sources: list[str], count_on: str = "fast", workers: int = 
                 return
             if (paths.pkg_dir(c.pkg) / "state.json").exists() and _excluded(c.pkg):
                 continue
+            if c.source == "dataverse" and not state.done(c.pkg, "fetch"):
+                try:
+                    _, _, c.size_bytes = discover.dv_judge(discover.dv_dataset_json("doi:" + c.doi))
+                except Exception as e:  # noqa: BLE001
+                    log(f"{c.pkg}: metadata error: {e}")
+                    continue
+            if c.size_bytes > max_bytes:
+                continue
             try:
                 if fetch_and_scan(c, keep_src, log):
                     ready.append(c.pkg)

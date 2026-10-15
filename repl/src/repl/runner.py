@@ -77,7 +77,7 @@ def manifest(root: Path) -> dict[str, list[int]]:
     return out
 
 
-def wrapper_text(pkg: str, arm: str, master: Path) -> str:
+def wrapper_text(pkg: str, arm: str, master: Path, cwd: Path | None = None) -> str:
     deps = deps_dir(pkg)
     lines = [
         f"* fastata replication harness: arm {arm} of {pkg}",
@@ -98,7 +98,7 @@ def wrapper_text(pkg: str, arm: str, master: Path) -> str:
             "}",
         ]
     lines += [
-        f"cd {sq(master.parent)}",
+        f"cd {sq(cwd or master.parent)}",
         f'di "{BEGIN}"',
         f"do {sq(master)}",
         f'di "{DONE}"',
@@ -210,7 +210,8 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
             return state.record(pkg, stage_name, False, reason="fastata setup failed (see results/arm_F_setup.log)")
         env["FASTATA_COUNTS"] = str(root / CALLS)
     master = root / meta["master"]
-    (root / WRAPPER).write_text(wrapper_text(pkg, arm, master))
+    cwd = root / meta["cwd"] if meta.get("cwd") else master.parent
+    (root / WRAPPER).write_text(wrapper_text(pkg, arm, master, cwd))
     log(f"{pkg}: arm {arm} running")
     r = sandbox.stata_batch(root / WRAPPER, cwd=root, home=home, rw=[root], ro=ro, env=env,
                             timeout=TIMEOUT_MIN[arm] * 60)

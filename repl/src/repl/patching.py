@@ -29,7 +29,7 @@ CD_RE = re.compile(r"^(\s*" + _PFX + r"(?:cd|chdir)\s+)(.+?)\s*$")
 INSTALL_RE = re.compile(
     r"^(\s*)(" + _PFX + r")((?:ssc\s+inst(?:a(?:l(?:l)?)?)?|net\s+(?:inst(?:a(?:l(?:l)?)?)?|from|get|set)"
     r"|ado\s+(?:update|uninstall)|adoupdate|github\s+install|ssc\s+install)\b.*)$")
-ABS_RE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/|~(?:[\\/]|$))")
+ABS_RE = re.compile(r"^(?:[A-Za-z]:(?:[\\/]|$)|\\\\|/|~(?:[\\/]|$))")
 
 
 def read_latin1(p: Path) -> str:
@@ -100,9 +100,25 @@ class Tree:
         return top
 
 
-def _global_refs(texts: dict[str, str], name: str) -> list[list[str]]:
-    pat = re.compile(r"\$(?:\{" + re.escape(name) + r"\}|" + re.escape(name) + r"(?![A-Za-z0-9_]))[\\/]([^\"'`\s,;()$]+)")
-    return [_norm(m.group(1)) for t in texts.values() for m in pat.finditer(t)]
+def _global_refs(texts: dict[str, str], name: str) -> tuple[list[list[str]], bool, bool]:
+    """(path parts after $name/..., used as a path at all, used without a separator as in
+    ${name}file.dta) over every do-file."""
+    n = re.escape(name)
+    sep = re.compile(r"\$(?:\{" + n + r"\}|" + n + r"(?![A-Za-z0-9_]))[\\/]([^\"'`,;()$\n]*)")
+    glued = re.compile(r"\$\{" + n + r"\}([^\"'`\s,;()$/\\]+\.[A-Za-z]\w{1,3})\b")
+    bare = re.compile(r"(?:\b(?:cd|use|using|do|run|save)\s+|\")\$(?:\{" + n + r"\}|" + n + r"(?![A-Za-z0-9_]))\s*(?:\"|,|$)", re.M)
+    refs: list[list[str]] = []
+    used = glue = False
+    for t in texts.values():
+        for m in sep.finditer(t):
+            refs.append(_norm(m.group(1).strip()))
+            used = True
+        for m in glued.finditer(t):
+            refs.append(_norm(m.group(1)))
+            used = glue = True
+        if bare.search(t):
+            used = True
+    return refs, used, glue
 
 
 _REL_RE = re.compile(r"(?:\"([^\"$`]+)\"|\b(?:use|using|do|run|save|include)\s+([^\s,\"$`]+))")
@@ -118,38 +134,129 @@ def _relative_refs(text: str) -> list[list[str]]:
     return out
 
 
-def infer_patches(src: Path, master_rel: str) -> list[dict]:
-    """Root-path and install-line patches for the package in src."""
+USER_IF_RE = re.compile(r"^(\s*)if\s+(?=[^{]*c\((?:username|hostname)\))[^{]*\{(.*)$")
+TOOL_RE = re.compile(r"^(\s*)(" + _PFX + r")((?:gtools|ftools|reghdfe)\s*,\s*(?:upgrade|install|compile|reload)\b.*)$")
+_PATH_CMD_RE = re.compile(r"\b(do|run|include|use|using|cd|save|saving\()\s*([^\s\"`',]*\\[^\s\"`',]*)")
+
+
+def _pathlike_backslashes(s: str) -> bool:
+    """s uses backslashes as path separators: each follows a path character and precedes one
+    (a TeX command such as \\hline or \\\\ does not), and s has no regex characters."""
+    if "\\" not in s or re.search(r"[\^*+?|\[\]]", s) or "&" in s:
+        return False
+    return all(i > 0 and re.match(r"[\w.}:)$'`~-]", s[i - 1]) and i + 1 < len(s) and re.match(r"[\w.$`{ -]", s[i + 1])
+               for i, ch in enumerate(s) if ch == "\\")
+
+
+def fix_backslashes(line: str) -> str:
+    """Windows path separators to /, in double-quoted strings and path arguments that are paths."""
+    if re.search(r"\b(?:u?regex\w*|u?subinstr|u?strpos|subinword|ustrregex\w*|split|parse)\b", line):
+        return line
+
+    def q(m: re.Match) -> str:
+        v = m.group(1)
+        return '"' + re.sub(r"\\(?![`$])", "/", v) + '"' if _pathlike_backslashes(v) else m.group(0)
+
+    out = re.sub(r'(?<!`)"([^"\n]*)"', q, line)
+
+    def b(m: re.Match) -> str:
+        v = m.group(2)
+        return m.group(1) + " " + re.sub(r"\\(?![`$])", "/", v) if _pathlike_backslashes(v) else m.group(0)
+
+    return _PATH_CMD_RE.sub(b, out)
+
+
+def _exists_dir(tree: Tree, base: str, value: str) -> bool:
+    """value names a directory of the package, relative to directory base."""
+    parts: list[str] = _norm(base)
+    for x in _norm(value):
+        if x == "..":
+            if not parts:
+                return False
+            parts.pop()
+        else:
+            parts.append(x)
+    return "/".join(parts).lower() in tree.dirs
+
+
+def infer_cwd(src: Path, master_rel: str) -> str:
+    """Directory to run the master from: the master's directory or the ancestor from which the
+    relative paths in the master resolve best."""
+    tree = Tree(src)
+    text = read_latin1(src / master_rel)
+    refs = _relative_refs(text)
+    parts = _norm(str(Path(master_rel).parent))
+    cands = ["/".join(parts[:i]) for i in range(len(parts), -1, -1)]
+    best = max(cands, key=lambda d: (tree.score(d.lower(), refs), -cands.index(d)))
+    return tree.real.get(best.lower(), best)
+
+
+def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[dict]:
+    """Root-path, user-switch, install-line and path-separator patches for the package in src.
+
+    global <g> "<v>" is rewritten to the package directory g most likely means when g is used
+    as a path and v is absolute, or holds no macro and is not a directory of the package (an
+    empty value or a placeholder such as "[SET YOUR PATH]"); cd "<v>" likewise when v is
+    absolute or empty. if "`c(username)'" == ... { branches (the first per file) become if 1 {.
+    """
     texts = {str(p.relative_to(src)): read_latin1(p) for p in sorted(src.rglob("*.do")) if p.is_file()}
     tree = Tree(src)
+    cwd = cwd if cwd is not None else infer_cwd(src, master_rel)
     master_dir = "/".join(_norm(str(Path(master_rel).parent)))
     patches = []
+    grefs: dict[str, tuple] = {}
     for rel, text in texts.items():
+        user_done = False
+        in_mata = False
         for line in text.splitlines():
-            m = GLOBAL_RE.match(line)
-            kind = "root path (global)"
-            if not m:
-                m2 = CD_RE.match(line)
-                if not m2:
-                    mi = INSTALL_RE.match(line)
-                    if mi:
-                        patches.append({"file": rel, "old": line, "new": f"{mi.group(1)}capture {mi.group(2)}{mi.group(3)}",
-                                        "why": "install line (no network in the run)"})
-                    continue
-                head, rest = m2.group(1), m2.group(2)
-                kind = "root path (cd)"
-                refs = _relative_refs(text)
-            else:
-                head, rest = m.group(1), m.group(3)
-                refs = _global_refs(texts, m.group(2))
-            pv = path_value(rest)
-            if not pv or not is_abs(pv[0]):
+            st = line.strip()
+            if re.match(r"mata\s*(?::|\{)?\s*$", st):
+                in_mata = True
+            elif in_mata and st == "end":
+                in_mata = False
+            if in_mata:
                 continue
-            value, s, e = pv
-            target = tree.best(refs, _norm(value.split("`")[0].split("$")[0]), master_dir)
-            newval = "{ARM}" + (f"/{target}" if target else "")
-            new_rest = rest[:s] + newval + rest[e:] if s else f'"{newval}"' + rest[e:]
-            patches.append({"file": rel, "old": line, "new": head + new_rest, "why": kind})
+            new, whys = line, []
+            mu = USER_IF_RE.match(new)
+            if mu and not user_done:
+                new = f"{mu.group(1)}if 1 {{{mu.group(2)}"
+                whys.append("user switch")
+                user_done = True
+            mi = INSTALL_RE.match(new) or TOOL_RE.match(new)
+            if mi:
+                new = f"{mi.group(1)}capture {mi.group(2)}{mi.group(3)}"
+                whys.append("install line (no network in the run)")
+            m = GLOBAL_RE.match(new)
+            m2 = None if m else CD_RE.match(new)
+            target = None
+            if m or m2:
+                head, rest = (m.group(1), m.group(3)) if m else (m2.group(1), m2.group(2))
+                pv = path_value(rest)
+                if pv:
+                    value, s, e = pv
+                    plain = "$" not in value and "`" not in value
+                    if m:
+                        name = m.group(2)
+                        if name not in grefs:
+                            grefs[name] = _global_refs(texts, name)
+                        refs, used, glue = grefs[name]
+                        if used and (is_abs(value) or (plain and (not value.strip() or not _exists_dir(tree, cwd, value)))):
+                            target = tree.best(refs, _norm(re.split(r"[`$]", value)[0]), master_dir)
+                            suffix = "/" if glue or value.endswith(("/", "\\")) else ""
+                            whys.append("root path (global)")
+                    elif is_abs(value) or (plain and value.strip() == ""):
+                        target = tree.best(_relative_refs(texts[rel]), _norm(re.split(r"[`$]", value)[0]), cwd)
+                        suffix = ""
+                        whys.append("root path (cd)")
+                    if target is not None:
+                        newval = "{ARM}" + (f"/{target}" if target else "") + suffix
+                        new = head + (rest[:s] + newval + rest[e:] if s else f'"{newval}"' + rest[e:])
+            fixed = fix_backslashes(new)
+            if fixed != new:
+                new = fixed
+                whys.append("path separators")
+            if new != line:
+                patches.append({"file": rel, "old": line, "new": new, "why": ", ".join(whys)})
     return patches
 
 

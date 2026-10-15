@@ -16,7 +16,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from . import icpsr, net, paths, state
-from .discover import DATAVERSE, ZENODO, Candidate, dv_dataset_json, dv_file_size
+from .discover import DATAVERSE, ZENODO, Candidate, dv_dataset_json, dv_file_size, dv_judge
 
 MAX_UNPACKED = 12 * 1024**3
 
@@ -94,6 +94,9 @@ def unpack_tree(root: Path, depth: int = 3) -> int:
 
 def fetch_dataverse(c: Candidate, src: Path) -> int:
     d = dv_dataset_json("doi:" + c.doi)
+    status, why, _ = dv_judge(d)
+    if status != "ok":
+        raise FetchError(why)
     total = 0
     for f in d["latestVersion"]["files"]:
         df = f["dataFile"]

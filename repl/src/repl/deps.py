@@ -52,6 +52,9 @@ def static_installs(src: Path) -> list[dict]:
     seen = set()
 
     def add(d: dict) -> None:
+        name = d.get("ssc") or d.get("net") or ""
+        if not NAME_RE.match(name):
+            return
         k = tuple(sorted(d.items()))
         if k not in seen:
             seen.add(k)
@@ -91,7 +94,12 @@ MISSING = [
     ("command", re.compile(r"^scheme (\S+) not found")),
     ("command", re.compile(r"^class (\S+) not found")),
     ("mata", re.compile(r"\b(\w+)\(\) not found")),
+    ("command", re.compile(r"[Mm]issing required (?:Stata |user-written |community-contributed )?"
+                           r"(?:command|package|program)s?:?\s+(\w+)")),
+    ("command", re.compile(r"^(?:error:\s*)?(\w+) (?:is )?not installed")),
+    ("command", re.compile(r"[Pp]lease (?:ssc )?install (\w+)")),
 ]
+NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
 
 
 def missing_names(log_text: str) -> list[tuple[str, str]]:
@@ -100,7 +108,7 @@ def missing_names(log_text: str) -> list[tuple[str, str]]:
     for ln in log_text.splitlines():
         for kind, pat in MISSING:
             m = pat.search(ln.strip())
-            if m and (kind, m.group(1)) not in out:
+            if m and NAME_RE.match(m.group(1)) and (kind, m.group(1)) not in out:
                 out.append((kind, m.group(1)))
     return out
 

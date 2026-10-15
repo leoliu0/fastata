@@ -64,7 +64,7 @@ def test_two_packages(root, tmp_path):
 
     r = pipeline.process(ok, log=lambda m: None)
     assert r["verdict"] == "PASS", r
-    assert r["counts"]["TIE"] == 1 and r["counts"]["DIFF"] == 0 and r["counts"]["SAME"] >= 4
+    assert r["counts"]["TIE"] == 1 and r["counts"]["DIFF"] == 0 and r["counts"]["SAME"] >= 4, r["notes"]
     assert state.ok(ok, "run_B")  # needed for where.dta
     assert not (Path.home() / "fxrepl_probe.txt").exists()
     calls = state.stage(ok, "run_F")["counts"]

@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sources", type=_sources, default=_sources(DEFAULT_SOURCES),
                    help=f"comma list of dataverse, zenodo, aea (default {DEFAULT_SOURCES})")
     p.add_argument("--refresh", action="store_true", help="refetch cached Dataverse metadata")
+    p.add_argument("--deep", action="store_true",
+                   help="check every Dataverse dataset's file list now (slow: rate-limited)")
 
     p = sub.add_parser("fetch", help="download packages into pkgs/<pkg>/src")
     p.add_argument("pkgs", nargs="+", help="package names (<source>-<id>)")
@@ -76,12 +78,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--eager-b", action="store_true", help="run arm B with F instead of only when needed")
     p.add_argument("--rediscover", action="store_true")
 
+    p = sub.add_parser("reset", help="forget recorded stages so that they run again")
+    p.add_argument("pkgs", nargs="*")
+    p.add_argument("--failed", action="store_true", help="every package that failed at or after --from")
+    p.add_argument("--from", dest="start", choices=["fetch", "scan", "prepare", "run", "compare"], default="prepare")
+
     p = sub.add_parser("status", help="stage records of packages")
     p.add_argument("pkgs", nargs="*")
 
     a = ap.parse_args(argv)
     if a.cmd == "discover":
-        discover.discover(a.sources, a.refresh)
+        discover.discover(a.sources, a.refresh, a.deep)
     elif a.cmd == "fetch":
         for pkg in a.pkgs:
             print(pkg, fetch.fetch(_cand(pkg), a.force))
@@ -103,6 +110,22 @@ def main(argv: list[str] | None = None) -> int:
                          only=a.only, keep_arms=a.keep_arms, keep_src=a.keep_src, eager_b=a.eager_b,
                          rediscover=a.rediscover)
         return 0 if n >= a.target else 1
+    elif a.cmd == "reset":
+        order = ["fetch", "scan", "prepare", "run_A", "run_F", "run_B", "compare"]
+        i0 = order.index("run_A" if a.start == "run" else a.start)
+        pkgs = list(a.pkgs)
+        if a.failed:
+            for st in report.pkg_states():
+                e = report.exclusion(st)
+                if e and order.index(e.split(":", 1)[0]) >= i0:
+                    pkgs.append(st["pkg"])
+        for pkg in pkgs:
+            names = order[i0:]
+            if i0 <= order.index("scan") and not (paths.pkg_dir(pkg) / "src").exists():
+                names = order  # sources were deleted: fetch again
+            state.clear(pkg, *names)
+            runner.remove_arms(pkg)
+        print(f"reset {len(pkgs)} package(s) from {a.start}")
     elif a.cmd == "status":
         pkgs = a.pkgs or [s["pkg"] for s in report.pkg_states()]
         for pkg in pkgs:

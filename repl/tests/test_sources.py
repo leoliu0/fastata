@@ -153,3 +153,15 @@ def test_read_env(tmp_path):
     p = tmp_path / "icpsr.env"
     p.write_text('# c\nexport ICPSR_EMAIL="a@b.c"\nICPSR_PASS=\'p=w\'\n')
     assert icpsr.read_env(p) == {"ICPSR_EMAIL": "a@b.c", "ICPSR_PASS": "p=w"}
+
+
+def test_throttled():
+    from repl.net import _throttled
+
+    class R:
+        def __init__(self, status, headers):
+            self.status_code, self.headers = status, headers
+
+    assert _throttled(R(429, {}))
+    assert _throttled(R(403, {"Server": "awselb/2.0", "Content-Type": "text/html"}))
+    assert not _throttled(R(403, {"Content-Type": "application/json"}))

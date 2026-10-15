@@ -8,7 +8,7 @@ rounds). The last arm A run is the package's arm A result.
 from __future__ import annotations
 
 from . import deps, paths, runner, state
-from .patching import infer_patches, load_meta, save_meta
+from .patching import infer_cwd, infer_patches, load_meta, save_meta
 
 MAX_ROUNDS = 5
 
@@ -21,10 +21,12 @@ def prepare(pkg: str, force: bool = False, log=print) -> dict:
         return state.record(pkg, "prepare", False, reason="no master do-file")
     src = paths.pkg_dir(pkg) / "src"
     old = load_meta(pkg)
+    cwd = infer_cwd(src, sc["master"])
     meta = {
         "master": sc["master"],
         "master_how": sc.get("master_how", ""),
-        "patches": infer_patches(src, sc["master"]),
+        "cwd": cwd,
+        "patches": infer_patches(src, sc["master"], cwd),
         "deps": old.get("deps", []),
     }
     save_meta(pkg, meta)
