@@ -5,7 +5,7 @@
 *! (missing key, key not unique) are raised here with the original's messages. Everything else
 *! runs the original.
 program _fx_isid
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'

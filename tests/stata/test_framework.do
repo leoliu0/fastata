@@ -252,6 +252,19 @@ foreach p of local fx_pos {
 }
 fastata on
 fx_where egen `"`rt'egen.ado"'
+* non-integer caller versions (ado-files under version 9.2, 11.2, ...): a caller of 9.2 must not
+* reach the original as "version 9.199999999999999" (invalid syntax). mean() by groups is in the
+* accumulation class (summation order follows the original's sort ties), hence tol(1e-13).
+foreach v in 9.2 11.2 13.1 16.1 {
+	fx_both "version `v': by g, sort: egen double t = total(x1)" , expect(egen any)
+	fx_both "version `v': egen double m = mean(x1), by(g)" , expect(egen any) tol(1e-13)
+	fx_both "version `v': isid id" , expect(isid any)
+	fx_both "version `v': duplicates report g" , expect(duplicates any) allr
+	fx_both "version `v': xtile q = x1, nq(4)" , expect(xtile any)
+	fx_both "version `v': pctile double p = x1, nq(4)" , expect(pctile any)
+	fx_both "version `v': tostring zi, gen(zs)" , expect(tostring any)
+	fx_both "version `v': destring sn, gen(snn) force" , expect(destring any)
+}
 di as txt "caller version and by ok"
 
 * ---------------------------------------------------------------------------------------------

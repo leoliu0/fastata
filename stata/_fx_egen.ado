@@ -4,7 +4,7 @@
 *! been tested on; every other call, and every input it is not sure about, runs the original
 *! egen. Protocol with the plugin: src/egen/spec.rs.
 program _fx_egen, byable(onecall)
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	local byv
