@@ -1,0 +1,81 @@
+# fastata
+
+Makes official Stata data commands fast, with the same syntax, results and messages: `egen`,
+`isid`, `duplicates`, `xtile`, `pctile`, `destring` and `tostring` (Stata 16 or newer). After a
+one-time `fastata enable`, Stata runs fastata's versions whenever these commands are called, in your
+do-files and inside other ado-files. The work runs in a compiled Rust plugin (Linux, macOS, Windows)
+that reads and writes the data in parallel and never sorts. Any input fastata has not been verified
+to handle runs the original command.
+
+## Install
+
+```stata
+net install fastata, from(https://leoliu0.github.io/fastata)
+fastata enable
+```
+
+`fastata enable` adds a few lines to your `profile.do`, so fastata is on in every new session.
+`fastata disable` removes them; `fastata off` / `fastata on` switch it for the current session;
+`fastata status` shows what ran fast in this session. Update with `ado update fastata, update`.
+See `help fastata`.
+
+## What is replaced
+
+| command | fast path covers | runs the original for |
+|---|---|---|
+| `egen` | `count group iqr max mean median min pctile rank rowmax rowmean rowmin rowmiss rownonmiss rowsd rowtotal sd std sum tag total`, with `by`, `if`, `in` | other functions, expressions with `_n`/`_N`/subscripts/random numbers, string results, a few options |
+| `isid` | every form | `using`; string keys with leading or trailing blanks |
+| `duplicates` | `report`, `examples`, `list`, `tag`, `drop` | `browse` and error cases |
+| `xtile`, `pctile` | `nquantiles()`, weights, `altdef`, `if`, `in` | `cutpoints()`, `genp()`, `iweight`s, weighted percentiles within rounding distance of a cumulative weight |
+| `destring` | `generate()`/`replace`, `force`, `float`, `percent`, `dpcomma`, `ignore()` | `ignore(…, illegal)`, non-ASCII values, hexadecimal-looking strings, numbers beyond Stata's range |
+| `tostring` | integers, with the default or a `%W.0g`/`%W.0f` format | other formats, non-integers |
+
+fastata checks every call and every original ado-file it depends on: if your Stata has other
+versions of the originals than those fastata was verified against, the originals run.
+
+## Same results
+
+On the fast path, the data (values bitwise, missing codes, types, formats, labels, notes,
+characteristics, sort marker), the Results-window output, errors and documented stored results are
+those of the original, with three documented exceptions (`help fastata`): fastata does not sort, so
+a later command that depends on the order of ties in a sort may order them differently;
+undocumented leftovers in `r()` are not reproduced; and `egen` sums, means and standard deviations
+within groups of unsorted data agree to a relative 1e-13 (one unit in the last place for float),
+because the original's own sums depend on the random order of ties in its internal sort.
+
+This is checked against the originals by 1,676 specifications across the seven commands, a
+randomized test of 3,000 cases, bitwise calibrations of `_pctile`, `summarize`, `real()`,
+`compress` and `string()`, and published replication packages run with and without fastata
+([repl/RESULTS.md](repl/RESULTS.md)).
+
+## Speed
+
+10 million observations, 100,000 groups, StataNow 19.5 MP on 32 cores
+([bench/RESULTS.md](bench/RESULTS.md)):
+
+| command | original s | fastata s | speed-up |
+|---|---:|---:|---:|
+| `duplicates report g` | 14.18 | 0.114 | 124x |
+| `xtile q = x1, nq(10)` | 8.55 | 0.090 | 95x |
+| `isid id` | 4.06 | 0.065 | 62x |
+| `egen t = tag(g)` | 7.13 | 0.163 | 44x |
+| `egen gg = group(g)` | 4.19 | 0.179 | 23x |
+| `duplicates tag g year, gen(dt)` | 4.41 | 0.249 | 18x |
+| `egen r = rank(x1), by(g)` | 3.60 | 0.210 | 17x |
+| `egen double md = median(x1), by(g)` | 3.43 | 0.330 | 10x |
+| `egen double m = mean(x1), by(g)` | 3.22 | 0.331 | 10x |
+| `destring sn, replace force` | 3.56 | 0.507 | 7x |
+| `tostring z, replace` | 2.94 | 0.538 | 5.5x |
+
+Commands that are already fast in Stata (no internal sort, e.g. `egen` row functions or
+`bysort g: egen` on data sorted by `g`) gain less: most of their time is Stata adding the new
+variable to the dataset, a cost any implementation pays.
+
+## Build from source
+
+Needs Rust 1.85+ and a C compiler. `scripts/build_plugin.sh` builds `stata/fastata.plugin`.
+Tests: `cargo test --release`; the mock host in `tests/mockhost`; and, in `tests/stata`,
+`stata-mp -b do run_all.do` (the full random test: `do test_random.do`). Benchmarks:
+`stata-mp -b do bench.do` in `bench`. Replication harness: `repl/` (`uv run repl --help`).
+
+MIT license.
