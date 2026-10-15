@@ -52,3 +52,13 @@ def test_wrapped_message(tmp_path):
     log = f'. cd "${{output_path}}"\nunable to change to {arm}/pk\n> g/output\nr(170);\n'
     assert failure_message(log)[0] == f"unable to change to {arm}/pkg/output"
     assert missing_dir(log, arm, arm) == "pkg/output"
+
+
+def test_cousin_dirs(tmp_path):
+    from repl.prepare import cousin_dirs
+
+    for d in ("P/Baseline Experiments/data", "P/Mechanism Experiments/data", "P/Robust Experiments/data/temp",
+              "P/Summary/out"):
+        (tmp_path / d).mkdir(parents=True)
+    assert cousin_dirs(tmp_path, "P/Baseline Experiments/data/temp") == ["P/Mechanism Experiments/data/temp"]
+    assert cousin_dirs(tmp_path, "P/Baseline Experiments/output/figures") == []

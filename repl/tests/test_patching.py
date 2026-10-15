@@ -118,6 +118,7 @@ def test_backslashes(tmp_path):
     assert fix_backslashes("do code\\1_prep.do") == "do code/1_prep.do"
     assert fix_backslashes("global out        ${dir}\\OUT") == "global out        ${dir}/OUT"
     assert fix_backslashes("local sep \\") == "local sep \\"
+    assert fix_backslashes('global DoFiles "$FilePath\\AuxDoFiles\\"') == 'global DoFiles "$FilePath/AuxDoFiles/"'
     assert fix_backslashes('cd "..\\out"') == 'cd "../out"'
     assert fix_backslashes('local s "\\hline"') == 'local s "\\hline"'
     assert fix_backslashes('esttab using x.tex, prehead("\\begin{table}" "a \\\\")') == \
@@ -227,3 +228,21 @@ def test_one_line_switch_and_cd_placeholder(tmp_path):
         == 'global drive "{ARM}/Q"'
     assert pts['cd "..."'] == 'cd "{ARM}/Analysis"'
     assert infer_cwd(src, "Analysis/Code/0-Master.do") == "Analysis"
+
+
+def test_os_switch_does_not_take_the_user_switch(tmp_path):
+    src = _tree(tmp_path, {"code/setup.do": (
+        'if c(os) == "MacOSX" global user "/Users/`c(username)\'"\n'
+        'if "$user" == "C:\\\\Users\\\\s1"{\n\tglobal dirpath "C:/Users/s1/pkg"\n}\n'
+        'cd "${dirpath}/code"\n'), "code/x.do": ""})
+    pts = {p["old"]: p["new"] for p in infer_patches(src, "code/setup.do")}
+    assert pts['if "$user" == "C:\\\\Users\\\\s1"{'] == "if 1 {"
+
+
+def test_cwd_ignores_comments_and_unbalanced_quotes(tmp_path):
+    from repl.patching import infer_cwd
+
+    src = _tree(tmp_path, {"p/code/run_all.do": ('/* a "quoted\nnote */\n* say "x\ndi "hi\n'
+                                                'do code/build/1_a.do\ndo code/build/2_b.do\n'),
+                           "p/code/build/1_a.do": "", "p/code/build/2_b.do": ""})
+    assert infer_cwd(src, "p/code/run_all.do") == "p"

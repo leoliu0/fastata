@@ -119,6 +119,7 @@ MISSING = [
     ("command", re.compile(r"[Pp]lease (?:ssc )?install (\w+)")),
     ("command", re.compile(r"\buses the (\w+) package\b")),
     ("command", re.compile(r"\brequires the (\w+) package\b")),
+    ("command", re.compile(r"\bmust have (\w+) version\b")),
     ("command", re.compile(r"\b(?:type|run)\s*:?\s*`?ssc inst(?:all)? (\w+)")),
     ("command", re.compile(r"[Rr]equired (?:command|package|program) '?(\w+)'? (?:not found|is not installed|missing)")),
 ]

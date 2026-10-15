@@ -18,7 +18,8 @@ from pathlib import Path
 from . import deps, paths, runner, state
 from .patching import infer_cwd, infer_patches, load_meta, save_meta
 
-MAX_ROUNDS = 8
+MAX_ROUNDS = 8  # arm A runs that install dependencies
+MAX_RUNS = 30  # arm A runs in all (directory repairs are cheap: the run fails where it did)
 
 _WRITE_FAIL = [
     re.compile(r"\bfile (.+?) could not be opened\b"),
@@ -176,6 +177,24 @@ def fetch_urls(pkg: str, patches: list[dict], log=print) -> list[dict]:
     return keep
 
 
+def cousin_dirs(src: Path, rel: str) -> list[str]:
+    """The same missing tail under the cousins of its deepest existing ancestor: data/temp missing
+    under "A Experiments/data" is also created under "B Experiments/data"."""
+    parts = Path(rel).parts
+    k = len(parts)
+    while k > 0 and not (src / Path(*parts[:k])).is_dir():
+        k -= 1
+    if k < 2:
+        return []
+    anc, tail = Path(*parts[:k]), Path(*parts[k:])
+    out = []
+    for c in sorted(src.joinpath(anc.parent.parent).glob(f"*/{anc.name}")):
+        r = c.relative_to(src)
+        if c.is_dir() and r != anc and not (c / tail).exists():
+            out.append(str(r / tail))
+    return out
+
+
 def prepare(pkg: str, force: bool = False, log=print) -> dict:
     if not force and state.done(pkg, "prepare"):
         return state.stage(pkg, "prepare") or {}
@@ -202,21 +221,23 @@ def prepare(pkg: str, force: bool = False, log=print) -> dict:
     meta["deps"] += ok
     tried |= set(ok) | set(failed)
     save_meta(pkg, meta)
-    rounds = 0
+    rounds = dep_rounds = 0
     while True:
         rounds += 1
         a = runner.run_arm(pkg, "A", force=True, log=log)
-        if a.get("ok") or rounds >= MAX_ROUNDS:
+        if a.get("ok") or rounds >= MAX_RUNS or dep_rounds >= MAX_ROUNDS:
             break
         logp = runner.results_dir(pkg) / "arm_A.log"
         text = logp.read_text(errors="replace") if logp.exists() else ""
         arm = runner.arm_dir(pkg, "A")
         d = missing_dir(text, arm, arm / cwd)
         if d and d not in meta["mkdirs"]:
-            log(f"{pkg}: creating missing directory {d}")
-            meta["mkdirs"].append(d)
+            new = [d] + [c for c in cousin_dirs(src, d) if c not in meta["mkdirs"]]
+            log(f"{pkg}: creating missing directories {new}")
+            meta["mkdirs"] += new
             save_meta(pkg, meta)
             continue
+        dep_rounds += 1
         groups = []
         for kind, name in deps.missing_names(text):
             g = deps.resolution(kind, name)

@@ -149,7 +149,7 @@ def _global_refs(texts: dict[str, str], name: str) -> tuple[list[list[str]], boo
     return refs, used, glue
 
 
-_REL_RE = re.compile(r"(?:\"([^\"$`]+)\"|\b(?:use|using|do|run|save|include)\s+([^\s,\"$`]+))")
+_REL_RE = re.compile(r"(?:\"([^\"$`\n]+)\"|\b(?:use|using|do|run|save|include)\s+([^\s,\"$`]+))")
 
 
 _PLAIN_GLOBAL_RE = re.compile(r"^\s*gl(?:o(?:b(?:a(?:l)?)?)?)?\s+(\w+)\s+\"?([^\"$`\n/\\:]*(?:[/\\][^\"$`\n:]*)?)\"?\s*(?://.*)?$", re.M)
@@ -158,6 +158,9 @@ _PLAIN_GLOBAL_RE = re.compile(r"^\s*gl(?:o(?:b(?:a(?:l)?)?)?)?\s+(\w+)\s+\"?([^\
 def _relative_refs(text: str) -> list[list[str]]:
     """Relative paths the text reads or runs, with globals the text sets to relative paths
     expanded ($build/x.do with global build "Build")."""
+    from .stataparse import logical_lines
+
+    text = "\n".join(logical_lines(text))
     vals = {m.group(1): m.group(2).strip() for m in _PLAIN_GLOBAL_RE.finditer(text)
             if m.group(2).strip() and not is_abs(m.group(2).strip())}
     if vals:
@@ -180,7 +183,8 @@ _USER_COND = (r"(?:c\((?:username|hostname)\)|(?=[^{]*==)[$`]\{?\w*(?:user|usr|c
               r"|(?=[^{]*==)[$`]\{?(?:pc|me)\b)")
 USER_IF_RE = re.compile(r"^(\s*)if\s+(?=[^{]*" + _USER_COND + r")[^{]*\{(.*)$", re.I)
 # one-line form: if "`c(username)'" == "x" global root "C:/..."
-USER_IF1_RE = re.compile(r"^(\s*)if\s+(?=.*" + _USER_COND + r")[^{]*?\s((?:gl(?:o(?:b(?:a(?:l)?)?)?)?|cd)\s.*)$", re.I)
+USER_IF1_RE = re.compile(r"^(\s*)if\s+(?!.*\{\s*$)(.*?)\s((?:gl(?:o(?:b(?:a(?:l)?)?)?)?|cd)\s.*)$", re.I)
+_USER_COND_RE = re.compile(_USER_COND, re.I)
 LOCAL_RE = re.compile(r"^(\s*" + _PFX + r"loc(?:al)?\s+([A-Za-z_]\w*)\s*(?:=\s*)?)(.+?)\s*$")
 PLACEHOLDER_RE = re.compile(r"[\[<{]|/|\\|path|your|here|xxx|\.\.\.|change|insert|directory|folder|dropbox", re.I)
 # graph formats console Stata cannot write (tif: no translator; gif, emf, wmf: Windows/Mac only)
@@ -200,7 +204,8 @@ def _pathlike_backslashes(s: str) -> bool:
     (a TeX command such as \\hline or \\\\ does not), and s has no regex characters."""
     if "\\" not in s or re.search(r"[\^*+?|\[\]]", s) or "&" in s:
         return False
-    return all(i > 0 and re.match(r"[\w.}:)$'`~-]", s[i - 1]) and i + 1 < len(s) and re.match(r"[\w.$`{ -]", s[i + 1])
+    return all(i > 0 and re.match(r"[\w.}:)$'`~-]", s[i - 1])
+               and (i + 1 == len(s) or re.match(r"[\w.$`{ -]", s[i + 1]))
                for i, ch in enumerate(s) if ch == "\\")
 
 
@@ -284,12 +289,14 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
             new, whys = line, []
             mu = USER_IF_RE.match(new)
             mu1 = None if mu else USER_IF1_RE.match(new)
+            if mu1 and not _USER_COND_RE.search(mu1.group(2)):
+                mu1 = None
             if mu and not user_done:
                 new = f"{mu.group(1)}if 1 {{{mu.group(2)}"
                 whys.append("user switch")
                 user_done = True
             elif mu1 and not user_done:
-                new = mu1.group(1) + mu1.group(2)
+                new = mu1.group(1) + mu1.group(3)
                 whys.append("user switch")
                 user_done = True
             mi = INSTALL_RE.match(new) or TOOL_RE.match(new)
