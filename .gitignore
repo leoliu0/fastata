@@ -5,3 +5,4 @@ tests/stata/*.smcl
 tests/stata/_plus/
 bench/*.log
 repl/.venv/
+bench/_plus/
