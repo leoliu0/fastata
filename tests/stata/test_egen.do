@@ -242,6 +242,50 @@ te "egen v = count(x1) if 0" fast
 te "egen v = tag(g) if 0" fast
 te "egen v = group(g) if 0" fast
 
+* ---- names starting with _: exact names of variables (tempvars as ado-files and do-files use
+* them, _merge) run the fast path; abbreviations and reserved names fall back
+tempvar a c b
+frame copy base bt
+frame bt {
+	quietly gen double `a' = round(x1/3)
+	quietly gen int `c' = mod(g, 7) if mod(id, 50)
+	quietly gen byte _merge = 1 + mod(id, 3)
+}
+frame copy bt btg
+frame btg: sort g id
+te "egen `b' = max(`a'), by(g)" fast bt
+te "egen double `b' = min(`a') if `a' > 0, by(`c')" fast bt
+te "bysort g: egen double `b' = mean(`a')" fast bt
+te "by g: egen `b' = total(`a')" fast btg
+te "egen double `b' = total(`a'), by(`c')" fast bt 1e-13
+te "egen `b' = rowtotal(`a' x1)" fast bt
+te "egen `b' = rowmax(x1 `a' `c')" fast bt
+te "egen `b' = group(`a')" fast bt
+te "egen `b' = group(`c' s), missing" fast bt
+te "egen `b' = tag(`a' g)" fast bt
+te "egen `b' = mean(x1) if `a' > 0" fast bt
+te "egen `b' = mean(x1) if `a'>0&`c'<3, by(g)" fast bt 1.2e-7
+te "egen `b' = rank(`a')" fast bt
+te "egen `b' = rank(`a'), by(`c') field" fast bt
+te "egen `b' = median(`a' + x2), by(g)" fast bt
+te "egen `b' = count(`c')" fast bt
+te "egen v = mean(x1), by(_merge)" fast bt 1.2e-7
+te "egen v = count(_merge), by(g)" fast bt
+te "egen v = total(x1) if _merge == 3" fast bt
+te "egen v = tag(_merge g)" fast bt
+te "egen v = rowmiss(_merge `a' x1)" fast bt
+local abbr = substr("`a'", 1, strlen("`a'") - 1)
+te "egen v = mean(`abbr')" fallback bt
+te "egen v = max(`abbr'), by(g)" fallback bt
+te "egen v = mean(_mer)" fallback bt
+te "egen v = mean(_Merge)" fallback bt
+te "egen v = mean(x1) if _n > 5" fallback bt
+te "egen v = total(_n)" fallback bt
+te "egen v = mean(_pi*x1)" fallback bt
+te "egen v = mean(_pi * `a')" fallback bt
+te "egen v = mean(x1) if _b[x1] > 0" fallback bt
+te "egen v = mean(`a') if _N > 5" fallback bt
+
 * ---- inputs that fall back
 te "egen x1 = mean(x2)" fallback
 te "egen v = mean(s)" fallback

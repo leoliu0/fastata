@@ -95,15 +95,33 @@ program Fast
 
 	* ---- text the fast path does not evaluate like the original
 	* _n, _N, subscripts and time-series operators: the original evaluates them in its own
-	* (sorted) order. Other names starting with _ and wildcards starting with *, ? or ~ could
-	* also match the temporary variable the original's sortpreserve adds. Random numbers, r(),
-	* s() and sum() depend on when and in which order the original evaluates them.
+	* (sorted) order. A name starting with _ must be, exactly (case-sensitive, no abbreviation),
+	* a variable of the dataset and not be followed by [ or (: the original runs with extra
+	* variables (sortpreserve's and its own tempvars, all named __...) that an abbreviation could
+	* match, and Stata's reserved names (_n, _pi, _b, ...) are no variables. Wildcards starting
+	* with *, ? or ~ could match those tempvars too. Random numbers, r(), s() and sum() depend on
+	* when and in which order the original evaluates them.
 	local txt `"`args' `if' `options'"'
 	if ustrregexm(`"`txt'"', "\[") | ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])[LFDSlfds][0-9]*[.(]") {
 		c_local fx_reason subscript
 		exit
 	}
-	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])_") {
+	* (no exit inside the loop: under version 16, exit inside a loop does not leave the program)
+	local reserved _n _N _b _se _coef _cons _pi _rc _skip _pred _all
+	local rest `"`txt'"'
+	local usbad 0
+	while !`usbad' & ustrregexm(`"`rest'"', "(^|[^A-Za-z0-9_])(_[A-Za-z0-9_]*)(\s*)([\[(]?)") {
+		local s0 = ustrregexs(0)
+		local tok = ustrregexs(2)
+		local nxt = ustrregexs(4)
+		local isv 0
+		if "`nxt'" == "" & !`: list tok in reserved' {
+			mata: st_local("isv", strofreal(st_nvar() ? anyof(st_varname(1..st_nvar()), st_local("tok")) : 0))
+		}
+		if !`isv' local usbad 1
+		local rest = usubstr(`"`rest'"', ustrpos(`"`rest'"', `"`s0'"') + ustrlen(`"`s0'"'), .)
+	}
+	if `usbad' {
 		c_local fx_reason underscore
 		exit
 	}
@@ -286,7 +304,8 @@ program Fast
 			}
 			else continue, break
 		}
-		local simple = ustrregexm(`"`e'"', "^\s*[A-Za-z][A-Za-z0-9_]*\s*$")
+		* a plain name (one starting with _ is an exact variable name, checked above)
+		local simple = ustrregexm(`"`e'"', "^\s*[A-Za-z_][A-Za-z0-9_]*\s*$")
 		local xv
 		if "`fcn'" == "count" {
 			if `simple' {
