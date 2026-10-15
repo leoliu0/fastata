@@ -3,9 +3,13 @@
 //! Stata convention); observations are 0-based.
 //!
 //! `read_block` and `write_block` may run concurrently on disjoint observations; every other
-//! method runs on the calling (Stata) thread only.
+//! method runs on the calling (Stata) thread only. String reads stay there because parallel
+//! ones are unsafe: `tests/stata/stress_strread.do` crashed StataNow 19.5 MP (Linux) with
+//! "double free or corruption" on its first 32-thread `strprobe` call over 2e7 str20/strL
+//! values. Serially, a str20 value takes 40 ns and a strL value 88 ns.
 
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::sync::{Mutex, PoisonError};
 
 use crate::error::{Error, Res};
 
@@ -100,12 +104,28 @@ pub unsafe fn set_plugin(p: *mut c_void) {
     unsafe { fx_set_plugin(p) }
 }
 
+/// Names of the locals set during the current `plugin call` (see [`saved_locals`]).
+static SAVED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Sets local macro `name` in the program that ran `plugin call`.
 pub fn local_save(name: &str, value: &str) -> Res<()> {
     let n = cstr(&format!("_{name}"));
     let v = cstr(value);
     let rc = unsafe { fx_macro_save(n.as_ptr(), v.as_ptr()) };
-    if rc != 0 { Err(Error::spi(rc, &format!("saving local {name}"))) } else { Ok(()) }
+    if rc != 0 {
+        return Err(Error::spi(rc, &format!("saving local {name}")));
+    }
+    let mut s = SAVED.lock().unwrap_or_else(PoisonError::into_inner);
+    if !s.iter().any(|x| x == name) {
+        s.push(name.to_string());
+    }
+    Ok(())
+}
+
+/// Takes the names of the locals [`local_save`] set since the last call, so that `stata_call`
+/// can list them in local `fx_locals` (`_fx_call.ado` copies exactly those to its caller).
+pub fn saved_locals() -> Vec<String> {
+    std::mem::take(&mut *SAVED.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
 /// Prints an error message (red) in the Results window.

@@ -31,6 +31,12 @@
 *!   status                            fx_orig_<c>, fx_ver_<c>, fx_nfast_<c>, fx_nfb_<c>,
 *!                                     fx_last_<c> for every replaced command c
 *!   filehash "<file>"                 fx_bytes, fx_hash: what the gate list records for file
+*! For fast paths (two-phase protocol, see src/cache.rs):
+*!   threads                           fx_threads: the plugin's threads= value
+*!   store <token> <type> <name> [<type> <name> ...]
+*!                                     adds the variables (nofill) and fills them from the
+*!                                     plugin's cache, under nobreak; on failure drops them again
+*!                                     and exits with the plugin's return code
 program _fx
 	version 16
 	args sub
@@ -67,6 +73,32 @@ program _fx
 			exit 199
 		}
 		c_local fx_prog `fx_prog'
+	}
+	else if "`sub'" == "threads" {
+		local t = cond(c(MP), c(processors), 0)
+		c_local fx_threads `t'
+	}
+	else if "`sub'" == "store" {
+		gettoken sub rest : 0
+		gettoken token rest : rest
+		local types
+		local names
+		while `"`rest'"' != "" {
+			gettoken t rest : rest
+			gettoken n rest : rest
+			local types `types' `t'
+			local names `names' `n'
+		}
+		local threads = cond(c(MP), c(processors), 0)
+		nobreak {
+			mata: (void) st_addvar(tokens(st_local("types")), tokens(st_local("names")), 1)
+			_fx_call `names', store "token=`token'" "threads=`threads'"
+			if `fx_plugrc' {
+				drop `names'
+				if `"`fx_errmsg'"' != "" di as err `"`fx_errmsg'"'
+				exit `fx_plugrc'
+			}
+		}
 	}
 	else if "`sub'" == "mode" {
 		args sub mode

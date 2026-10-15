@@ -1,21 +1,28 @@
 //! Stata plugin (SPI 3.0) behind fastata, fast drop-in versions of official Stata data commands.
 //!
 //! Only `pginit` and `stata_call` are exported. Every Stata API call goes through `c/glue.c`
-//! (wrapped by [`io`]); worker threads live only inside a call ([`par`]). Each command's
-//! ado/plugin protocol is documented in its `spec_<cmd>` module.
+//! (wrapped by [`io`]); worker threads live only inside a call ([`par`]). The commands follow
+//! the two-phase protocol of [`cache`]; each documents its ado/plugin protocol in its module.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Mutex, Once, PoisonError};
 
 mod args;
+mod cache;
+mod dup;
+mod egen;
 mod error;
 mod group;
 mod io;
 mod par;
+mod quant;
 mod selftest;
+mod strnum;
+mod strprobe;
 #[cfg(test)]
 mod testutil;
+mod xtile;
 
 use args::Args;
 use error::{Error, Res};
@@ -51,7 +58,8 @@ pub unsafe extern "C" fn pginit(p: *mut c_void) -> c_int {
 ///
 /// A fallback ([`Error::fallback`]) sets local `fx_fallback` to the reason and returns 0. Any
 /// other error is printed, stored in local `fx_errmsg` (the ado calls the plugin under `capture`,
-/// which hides the printed message) and returned as the return code.
+/// which hides the printed message) and returned as the return code. Both empty the cache of the
+/// two-phase protocol. Last, local `fx_locals` lists every local the call set.
 ///
 /// # Safety
 /// `argv` holds `argc` NUL-terminated strings (Stata guarantees this).
@@ -60,14 +68,22 @@ pub unsafe extern "C" fn stata_call(argc: c_int, argv: *mut *mut c_char) -> c_in
     let argv: Vec<String> = (0..argc.max(0) as usize)
         .map(|i| unsafe { CStr::from_ptr(*argv.add(i)) }.to_string_lossy().into_owned())
         .collect();
-    let err = match panic::catch_unwind(AssertUnwindSafe(|| run(&argv))) {
-        Ok(Ok(())) => return 0,
-        Ok(Err(e)) if e.is_fallback() => match io::local_save("fx_fallback", &e.msg) {
-            Ok(()) => return 0,
-            Err(e) => e,
-        },
-        Ok(Err(e)) => e,
+    io::saved_locals();
+    let rc = match panic::catch_unwind(AssertUnwindSafe(|| run(&argv))) {
+        Ok(Ok(())) => 0,
+        Ok(Err(e)) if e.is_fallback() => {
+            cache::clear();
+            match io::local_save("fx_fallback", &e.msg) {
+                Ok(()) => 0,
+                Err(e) => report(e),
+            }
+        }
+        Ok(Err(e)) => {
+            cache::clear();
+            report(e)
+        }
         Err(payload) => {
+            cache::clear();
             let msg = PANIC_MSG.lock().unwrap_or_else(PoisonError::into_inner).take().unwrap_or_else(|| {
                 payload
                     .downcast_ref::<&str>()
@@ -75,9 +91,19 @@ pub unsafe extern "C" fn stata_call(argc: c_int, argv: *mut *mut c_char) -> c_in
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".into())
             });
-            Error::new(9999, format!("fastata: internal error (panic: {msg}); please report it"))
+            report(Error::new(9999, format!("fastata: internal error (panic: {msg}); please report it")))
         }
     };
+    // Best effort: without fx_locals, _fx_call copies no results, which the ado treats as a
+    // failed call.
+    let names = io::saved_locals();
+    let _ = io::local_save("fx_locals", &names.join(" "));
+    io::saved_locals();
+    rc
+}
+
+/// Prints `err`, saves its message in local `fx_errmsg` and returns its return code.
+fn report(err: Error) -> c_int {
     io::error(&format!("{err}\n"));
     // Best effort: the return code already reports the failure.
     let _ = io::local_save("fx_errmsg", &err.msg);
@@ -86,12 +112,22 @@ pub unsafe extern "C" fn stata_call(argc: c_int, argv: *mut *mut c_char) -> c_in
 
 fn run(argv: &[String]) -> Res<()> {
     let a = Args::parse(argv)?;
+    let spi = io::SpiIo::new();
     match a.cmd.as_str() {
         "version" => {
             a.only(&[])?;
             io::local_save("fx_plugver", env!("CARGO_PKG_VERSION"))
         }
-        "selftest" => selftest::run(&io::SpiIo::new(), &a),
+        "selftest" => selftest::run(&spi, &a),
+        "strprobe" => strprobe::run(&spi, &a),
+        "cachetest" => cache::cachetest(&spi, &a),
+        "store" => cache::store(&spi, &a),
+        "egen" => egen::run(&spi, &a),
+        "isid" => dup::run_isid(&spi, &a),
+        "dup" => dup::run_dup(&spi, &a),
+        "quant" => xtile::run(&spi, &a),
+        "destring" => strnum::run_destring(&spi, &a),
+        "tostring" => strnum::run_tostring(&spi, &a),
         c => Err(Error::syntax(format!("fastata plugin: unknown command `{c}`"))),
     }
 }
