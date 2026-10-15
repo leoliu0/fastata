@@ -746,10 +746,16 @@ string colvector _fx_shim_lines(string scalar cmd, string scalar ver)
 		l = l \ (t + "if _by() local byp by " + _fx_q("_byvars") + " " + _fx_q("_byrc0") + ":")
 		l = l \ (call + _fx_q("byp") + " _fx_egen " + _fx_q("0"))
 	}
+	else if (cmd == "duplicates") {
+		// rclass: an error exit would post this program's empty r() over the r() that the
+		// original set before failing (r(N) before error 2000), so run under capture noisily
+		// (same output and messages) and exit with the return code after return add
+		l = l \ (t + "capture noisily version " + _fx_q("caller") + ": _fx_duplicates " + _fx_q("0"))
+		l = l \ (t + "local rc = _rc") \ (t + "return add") \ (t + "exit " + _fx_q("rc"))
+	}
 	else {
 		l = l \ (call + "_fx_" + cmd + " " + _fx_q("0"))
 	}
-	if (cmd == "duplicates") l = l \ (t + "return add")
 	l = l \ "end"
 	return(l)
 }
