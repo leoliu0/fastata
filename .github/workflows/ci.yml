@@ -35,6 +35,16 @@ jobs:
         with:
           key: ${{ matrix.os }}
 
+      - name: Versions agree (Linux)
+        if: runner.os == 'Linux'
+        run: sh scripts/check-versions.sh
+
+      - name: fastata.pkg lists every ado and help file (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          diff <(cd stata && ls *.ado *.sthlp 2>/dev/null | sort) <(awk '$1 == "f" {print $2}' stata/fastata.pkg | sort)
+
       - name: Rust tests
         run: cargo test --release
 

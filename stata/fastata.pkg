@@ -1,0 +1,32 @@
+v 3
+d fastata: fast official Stata data commands (Rust plugin)
+d
+d fastata makes egen, isid, duplicates, xtile, pctile, destring and tostring fast without
+d changing their syntax, results or messages. After fastata enable, Stata runs fastata's versions
+d of these commands whenever they are called, also from other ado-files; any input fastata has not
+d verified runs the original command. fastata disable undoes it. The computation is a compiled
+d Rust plugin (Linux, macOS, Windows).
+d
+d Author: Leo Liu, auleo.liu@gmail.com
+d License: MIT
+d Distribution-Date: 20261015
+f fastata.ado
+f fastata_init.ado
+f _fx.ado
+f _fx_call.ado
+f _fx_gatelist.ado
+f _fx_egen.ado
+f _fx_isid.ado
+f _fx_duplicates.ado
+f _fx_xtile.ado
+f _fx_pctile.ado
+f _fx_destring.ado
+f _fx_tostring.ado
+g LINUX64 fastata.linux64.plugin fastata.plugin
+g LINUX64P fastata.linux64.plugin fastata.plugin
+g MACARM64 fastata.macos-universal.plugin fastata.plugin
+g OSX.ARM64 fastata.macos-universal.plugin fastata.plugin
+g MACINTEL64 fastata.macos-universal.plugin fastata.plugin
+g OSX.X8664 fastata.macos-universal.plugin fastata.plugin
+g WIN64 fastata.win64.plugin fastata.plugin
+h fastata.plugin

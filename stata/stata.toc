@@ -1,0 +1,3 @@
+v 3
+d fastata -- fast official Stata data commands (Rust plugin)
+p fastata makes egen, isid, duplicates, xtile, pctile, destring and tostring fast, invisibly
