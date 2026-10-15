@@ -101,7 +101,7 @@ program _fxa_enable
 	di as txt `"fastata: enabled; Stata loads it at startup through `profile'"'
 	capture confirm file `"`c(pwd)'/profile.do"'
 	if !_rc {
-		mata: st_local("same", strofreal(pathjoin(c("pwd"), "profile.do") == st_local("profile")))
+		quietly mata: st_local("same", strofreal(pathjoin(c("pwd"), "profile.do") == st_local("profile")))
 		if !`same' {
 			di as txt `"note: Stata sessions started in `c(pwd)' run the profile.do there instead,"'
 			di as txt "      so fastata is inactive in them unless {bf:capture fastata_init} is added to it"
@@ -173,11 +173,23 @@ program _fxa_status
 		di as txt "  in use:      " as res `"`fx_active'"' as txt " (built for an earlier PLUS)"
 	}
 	di as txt "  threads:     " as res "`threads'"
+	if "`fx_mode'" != "auto" di as txt "  mode:        " as res "`fx_mode'"
 	di
 	di as txt "  {ralign 10:command}  {lalign 9:verified}  {ralign 8:fast}  {ralign 8:fallback}  last fallback reason"
+	local nv 0
 	foreach c in egen isid duplicates xtile pctile destring tostring {
 		di as txt "  {ralign 10:`c'}  " as res "{lalign 9:`=word(`"`fx_ver_`c''"', 1)'}"	///
 			"  {ralign 8:`fx_nfast_`c''}  {ralign 8:`fx_nfb_`c''}  " as txt `"`fx_last_`c''"'
+		local nv = `nv' + `fx_vok_`c'' + `fx_vmis_`c'' + `fx_vskip_`c''
+	}
+	* verify mode (_fx mode verify or env FASTATA_MODE=verify): fast calls checked against the
+	* original
+	if `nv' {
+		di
+		di as txt "  {ralign 10:verify}  {ralign 9:ok}  {ralign 8:mismatch}  {ralign 8:skipped}"
+		foreach c in egen isid duplicates xtile pctile destring tostring {
+			di as txt "  {ralign 10:`c'}  " as res "{ralign 9:`fx_vok_`c''}  {ralign 8:`fx_vmis_`c''}  {ralign 8:`fx_vskip_`c''}"
+		}
 	}
 	di
 	di as txt "  originals:"

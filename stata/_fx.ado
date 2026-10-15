@@ -3,15 +3,34 @@
 *! everything that needs the functions below goes through this program:
 *!     _fx <subcommand> <arguments>
 *! Results come back as locals of the caller. No subcommand touches the data, the sort order or
-*! the random-number generators. Mata names are prefixed _fx_. Backquotes and single quotes in
-*! Mata strings are built with char(96) and char(39): macros are expanded in ado-file Mata code.
+*! the random-number generators, except verify (below). Mata names are prefixed _fx_. Backquotes
+*! and single quotes in Mata strings are built with char(96) and char(39): macros are expanded in
+*! ado-file Mata code. Mata lines that print nothing run under quietly: a non-quiet mata: line
+*! switches an SMCL log to {res}, which the original commands' logs would not show.
 *!
 *! For the _fx_<cmd> programs:
-*!   gate <key>                        fx_ok: 1 if every original file of key is verified; fx_why
+*!   gate <key>                        fx_ok: 1 if every original file of key is verified; fx_why;
+*!                                     fx_vpend: 1 in verify mode when fx_ok is 1 (gate has then
+*!                                     copied the current frame to frame __fx_vsnap)
 *!   count <cmd> fast|fallback ["<reason>"]
 *!   orig <cmd>                        fx_prog: the program that runs cmd's original ado-file
+*!   verify <cmd> <caller> <rc0> <frc> <fleft> "<byvars>" "<byrc0>" <tol> "<rspec>" "<args>"
+*!                                     after a fast path that ran with fx_vpend 1, with frc its
+*!                                     return code and fleft the c(rc) it left ("": not compared,
+*!                                     the fast path does not reproduce it): runs the original
+*!                                     (quietly) on the snapshot, as the shim would have (caller
+*!                                     version, by prefix, arguments, c(rc) rc0 at entry) from the
+*!                                     random-number states at gate, compares its result with the
+*!                                     fast path's (rspec: "name value" pairs of r() scalars; tol:
+*!                                     reldif for values, 0 bitwise), counts verify_ok,
+*!                                     verify_mismatch or verify_skipped, keeps the original's
+*!                                     data (and r(), c(rc), random-number states) and sets
+*!                                     fx_vrc to the original's return code
 *! For fastata and the tests:
-*!   mode auto|original                original: every replaced command runs its original
+*!   mode auto|original|verify         original: every replaced command runs its original;
+*!                                     verify: every fast path is checked against the original
+*!                                     (see verify). Without a mode set this session (clear all
+*!                                     forgets it), the mode is env FASTATA_MODE, else auto
 *!   counts_save "<file.csv>"          this session's counts as cmd,fast,fallback,last_reason
 *!   reset                             forgets cached gate verdicts, file hashes and gate list
 *!   runtime "<dir>" <version>         builds runtime directory dir
@@ -28,8 +47,9 @@
 *!   has_block "<file>"                fx_hasblock: 1 if file has the startup lines
 *!   profile_write "<file>" 0|1        fx_rc: removes the startup lines, then adds them if 1
 *!   block                             displays the startup lines as an error message
-*!   status                            fx_orig_<c>, fx_ver_<c>, fx_nfast_<c>, fx_nfb_<c>,
-*!                                     fx_last_<c> for every replaced command c
+*!   status                            fx_mode; fx_orig_<c>, fx_ver_<c>, fx_nfast_<c>, fx_nfb_<c>,
+*!                                     fx_last_<c>, fx_vok_<c>, fx_vmis_<c>, fx_vskip_<c> for
+*!                                     every replaced command c
 *!   filehash "<file>"                 fx_bytes, fx_hash: what the gate list records for file
 *! For fast paths (two-phase protocol, see src/cache.rs):
 *!   threads                           fx_threads: the plugin's threads= value
@@ -42,17 +62,24 @@ program _fx
 	args sub
 	if "`sub'" == "gate" {
 		args sub key
-		mata: _fx_gate_check(st_local("key"))
+		local envm : env FASTATA_MODE
+		quietly mata: _fx_gate_check(st_local("key"), st_local("envm"))
 		c_local fx_ok `fx_ok'
 		c_local fx_why `"`fx_why'"'
+		* verify mode: the snapshot that verify runs the original on, taken before the fast path
+		* changes anything
+		if "`fx_vmode'" == "1" VSnap
+		c_local fx_vpend `fx_vmode'
 	}
 	else if "`sub'" == "count" {
 		args sub cmd kind why
-		mata: _fx_count(st_local("cmd"), st_local("kind"), st_local("why"))
+		quietly mata: _fx_count(st_local("cmd"), st_local("kind"), st_local("why"))
+		* a fallback does not need the snapshot that gate took in verify mode
+		if `fx_vdrop' capture frame drop __fx_vsnap
 		* FASTATA_COUNTS names a file that gets one line per call (the replication harness reads
 		* it; unlike the session counters it survives clear all)
 		local f : env FASTATA_COUNTS
-		if `"`f'"' != "" {
+		if `"`f'"' != "" & !`fx_skip' {
 			tempname fh
 			capture file open `fh' using `"`f'"', write text append
 			if !_rc {
@@ -61,9 +88,62 @@ program _fx
 			}
 		}
 	}
+	else if "`sub'" == "verify" {
+		args sub cmd caller rc0 frc fleft byv byrc0 tol rspec cargs
+		quietly mata: _fx_vtake()
+		local orc `frc'
+		* fleft "": the fast path does not reproduce the c(rc) that the original leaves
+		local oleft = cond("`fleft'" == "", "0", "`fleft'")
+		if "`fx_vframe'" != "" {
+			capture _fx orig `cmd'
+			if _rc {
+				local fx_vwhy "original r(`=_rc')"
+				capture frame drop `fx_vframe'
+				local fx_vframe
+			}
+		}
+		if "`fx_vframe'" == "" {
+			_fx count `cmd' verify_skipped `"`fx_vwhy'"'
+		}
+		else {
+			* the original from the random-number states at the start of the call, so that it
+			* leaves them as a run without fastata would; nothing below draws from them
+			set rngstate `fx_vrs'
+			set sortrngstate `fx_vsrs'
+			local fx_oleft
+			quietly mata: _fx_vinset(1)
+			frame `fx_vframe' {
+				capture quietly VRun `fx_prog' `caller' `rc0' `"`byv'"' `"`byrc0'"' `"`cargs'"'
+				local orc = _rc
+				local sbo : sortedby
+				local dlo : data label
+			}
+			quietly mata: _fx_vinset(0)
+			local sbf : sortedby
+			local dlf : data label
+			local fx_vdiff
+			if `frc' != `orc' local fx_vdiff "return code `frc' vs `orc'"
+			else quietly mata: _fx_vcompare("`fx_vframe'", `tol', st_local("rspec"))
+			if `"`fx_vdiff'"' == "" & `orc' == 0 & "`fleft'" != "" & "`fleft'" != "`fx_oleft'" {
+				local fx_vdiff "c(rc) left `fleft' vs `fx_oleft'"
+			}
+			if `orc' == 0 & "`fx_oleft'" != "" local oleft `fx_oleft'
+			* keep the original's data: the frame it ran in takes the place of the current one
+			local cur = c(frame)
+			frame rename `cur' __fx_vold
+			frame rename `fx_vframe' `cur'
+			frame change `cur'
+			frame drop __fx_vold
+			if `"`fx_vdiff'"' == "" _fx count `cmd' verify_ok
+			else _fx count `cmd' verify_mismatch `"`fx_vdiff'"'
+		}
+		c_local fx_vrc `orc'
+		* c(rc) as the original left it
+		capture error `oleft'
+	}
 	else if "`sub'" == "orig" {
 		args sub cmd
-		mata: _fx_orig_prog(st_local("cmd"))
+		quietly mata: _fx_orig_prog(st_local("cmd"))
 		if `"`fx_err'"' != "" {
 			di as err `"fastata: `fx_err'"'
 			exit 198
@@ -91,7 +171,7 @@ program _fx
 		}
 		local threads = cond(c(MP), c(processors), 0)
 		nobreak {
-			mata: (void) st_addvar(tokens(st_local("types")), tokens(st_local("names")), 1)
+			quietly mata: (void) st_addvar(tokens(st_local("types")), tokens(st_local("names")), 1)
 			_fx_call `names', store "token=`token'" "threads=`threads'"
 			if `fx_plugrc' {
 				drop `names'
@@ -102,81 +182,83 @@ program _fx
 	}
 	else if "`sub'" == "mode" {
 		args sub mode
-		if !inlist("`mode'", "auto", "original") {
-			di as err "_fx mode: specify auto or original"
+		if !inlist("`mode'", "auto", "original", "verify") {
+			di as err "_fx mode: specify auto, original or verify"
 			exit 198
 		}
-		mata: _fx_setmode(st_local("mode"))
+		quietly mata: _fx_setmode(st_local("mode"))
 	}
 	else if "`sub'" == "counts_save" {
 		args sub path
-		mata: _fx_counts_save(st_local("path"))
+		quietly mata: _fx_counts_save(st_local("path"))
 	}
 	else if "`sub'" == "reset" {
-		mata: _fx_reset()
+		quietly mata: _fx_reset()
 	}
 	else if "`sub'" == "runtime" {
 		args sub dir ver
-		mata: _fx_runtime_build(st_local("dir"), st_local("ver"))
+		quietly mata: _fx_runtime_build(st_local("dir"), st_local("ver"))
 	}
 	else if "`sub'" == "rtpath" {
-		mata: st_local("fx_rt", _fx_rtpath())
+		quietly mata: st_local("fx_rt", _fx_rtpath())
 		c_local fx_rt `"`fx_rt'"'
 	}
 	else if "`sub'" == "rtversion" {
 		args sub dir
-		mata: st_local("fx_have", _fx_rtversion(st_local("dir")))
+		quietly mata: st_local("fx_have", _fx_rtversion(st_local("dir")))
 		c_local fx_have `"`fx_have'"'
 	}
 	else if "`sub'" == "onpath" {
 		args sub dir
-		mata: _fx_onpath(st_local("dir"))
+		quietly mata: _fx_onpath(st_local("dir"))
 		c_local fx_onpath `fx_onpath'
 		c_local fx_active `"`fx_active'"'
 	}
 	else if "`sub'" == "pathpos" {
 		args sub dir
-		mata: _fx_pathpos(st_local("dir"))
+		quietly mata: _fx_pathpos(st_local("dir"))
 		c_local fx_pos `fx_pos'
 	}
 	else if "`sub'" == "rmruntime" {
 		args sub dir
-		mata: _fx_rmruntime(st_local("dir"))
+		quietly mata: _fx_rmruntime(st_local("dir"))
 	}
 	else if "`sub'" == "mkdirp" {
 		args sub dir
-		mata: _fx_mkdirp(st_local("dir"))
+		quietly mata: _fx_mkdirp(st_local("dir"))
 	}
 	else if inlist("`sub'", "profile_first", "profile_with_block") {
 		args sub envpath home rt
-		mata: _fx_`sub'(st_local("envpath"), st_local("home"), st_local("rt"))
+		quietly mata: _fx_`sub'(st_local("envpath"), st_local("home"), st_local("rt"))
 		if "`sub'" == "profile_first" c_local fx_profile `"`fx_profile'"'
 		else c_local fx_profiles `"`fx_profiles'"'
 	}
 	else if "`sub'" == "has_block" {
 		args sub file
-		mata: st_local("fx_hasblock", strofreal(_fx_has_block(st_local("file"))))
+		quietly mata: st_local("fx_hasblock", strofreal(_fx_has_block(st_local("file"))))
 		c_local fx_hasblock `fx_hasblock'
 	}
 	else if "`sub'" == "profile_write" {
 		args sub file add
-		mata: _fx_profile_write(st_local("file"), `add')
+		quietly mata: _fx_profile_write(st_local("file"), `add')
 		c_local fx_rc `fx_rc'
 	}
 	else if "`sub'" == "block" {
 		mata: printf("{err}%s\n", invtokens(_fx_block()', char(10)))
 	}
 	else if "`sub'" == "status" {
-		mata: _fx_status()
+		local envm : env FASTATA_MODE
+		quietly mata: _fx_status(st_local("envm"))
+		c_local fx_mode `fx_mode'
 		foreach c in egen isid duplicates xtile pctile destring tostring {
-			foreach s in orig ver nfast nfb last {
+			foreach s in orig ver nfast nfb last vok vmis vskip {
 				c_local fx_`s'_`c' `"`fx_`s'_`c''"'
 			}
 		}
 	}
 	else if "`sub'" == "filehash" {
 		args sub file
-		mata: _fx_hash_locals(st_local("file"))
+		quietly mata: _fx_hash_locals(st_local("file"))
 		c_local fx_bytes `fx_bytes'
 		c_local fx_hash `fx_hash'
 	}
@@ -184,6 +266,35 @@ program _fx
 		di as err `"_fx: unknown subcommand `sub'"'
 		exit 198
 	}
+end
+
+* Verify mode, from gate: copies the current frame to frame __fx_vsnap and records the
+* random-number states (reading them does not advance them), or records why it could not.
+program VSnap
+	capture frame drop __fx_vsnap
+	local srs = c(sortrngstate)
+	local rs = c(rngstate)
+	local why
+	capture frame copy `c(frame)' __fx_vsnap
+	if _rc {
+		local why "snapshot r(`=_rc')"
+		capture frame drop __fx_vsnap
+	}
+	quietly mata: _fx_vset(st_local("why"), st_local("srs"), st_local("rs"))
+end
+
+* Verify mode: runs original program prog as the shim would have run it (caller version, by
+* prefix, arguments, c(rc) at entry); sets fx_oleft in the caller to the c(rc) it leaves.
+program VRun
+	args prog caller rc0 byv byrc0 cargs
+	capture error `rc0'
+	if `"`byv'"' != "" {
+		version `caller': by `byv' `byrc0': `prog' `cargs'
+	}
+	else {
+		version `caller': `prog' `cargs'
+	}
+	c_local fx_oleft `=c(rc)'
 end
 
 version 16
@@ -521,20 +632,26 @@ string rowvector _fx_verdict(string scalar key)
 	return(("1", ""))
 }
 
-// Sets locals fx_ok and fx_why. Verdicts are cached per key and state.
-void _fx_gate_check(string scalar key)
+// Sets locals fx_ok and fx_why, and fx_vmode (1 when the fast path is to be verified). Verdicts
+// are cached per key and state. envm: the value of env FASTATA_MODE.
+void _fx_gate_check(string scalar key, string scalar envm)
 {
 	pointer(transmorphic scalar) scalar pv
-	pointer() scalar pm
-	string scalar ck
+	string scalar ck, mode
 	string rowvector v
 
-	if ((pm = findexternal("_fx_mode_v")) != NULL) {
-		if (*pm == "original") {
-			st_local("fx_ok", "0")
-			st_local("fx_why", "mode original")
-			return
-		}
+	st_local("fx_vmode", "0")
+	mode = _fx_getmode(envm)
+	if (mode == "original") {
+		st_local("fx_ok", "0")
+		st_local("fx_why", "mode original")
+		return
+	}
+	// a replaced command that an original calls while verify runs it: the original's call
+	if (_fx_vin()) {
+		st_local("fx_ok", "0")
+		st_local("fx_why", "verify run")
+		return
 	}
 	pv = _fx_ext("_fx_verdicts")
 	ck = key + char(0) + _fx_state()
@@ -545,6 +662,7 @@ void _fx_gate_check(string scalar key)
 	}
 	st_local("fx_ok", v[1])
 	st_local("fx_why", v[2])
+	if (mode == "verify" & v[1] == "1") st_local("fx_vmode", "1")
 }
 
 void _fx_setmode(string scalar mode)
@@ -555,22 +673,250 @@ void _fx_setmode(string scalar mode)
 	*p = mode
 }
 
-string scalar _fx_getmode()
+// The mode: the one set by _fx mode, else envm (env FASTATA_MODE, which survives clear all; clear
+// all drops Mata externals) when it is auto, original or verify, else auto.
+string scalar _fx_getmode(string scalar envm)
+{
+	pointer() scalar p
+	string scalar e
+
+	if ((p = findexternal("_fx_mode_v")) != NULL) {
+		if (*p != "") return(*p)
+	}
+	e = strlower(strtrim(envm))
+	if (e == "original" | e == "verify") return(e)
+	return("auto")
+}
+
+// ---------------------------------------------------------------------------- verify mode
+
+// Records the pending verification of the running fast path: why it cannot be verified ("" when
+// frame __fx_vsnap holds the snapshot), and the sort and regular random-number states.
+void _fx_vset(string scalar why, string scalar srs, string scalar rs)
 {
 	pointer() scalar p
 
-	if ((p = findexternal("_fx_mode_v")) == NULL) return("auto")
-	if (*p == "") return("auto")
+	if ((p = findexternal("_fx_vrec")) == NULL) p = crexternal("_fx_vrec")
+	*p = (why, srs, rs)
+}
+
+// Takes the pending verification: locals fx_vframe (the snapshot frame, "" if none), fx_vwhy,
+// fx_vsrs and fx_vrs.
+void _fx_vtake()
+{
+	pointer() scalar p
+	string rowvector r
+
+	if ((p = findexternal("_fx_vrec")) == NULL) r = ("no snapshot", "", "")
+	else {
+		r = *p
+		rmexternal("_fx_vrec")
+	}
+	st_local("fx_vframe", r[1] == "" ? "__fx_vsnap" : "")
+	st_local("fx_vwhy", r[1])
+	st_local("fx_vsrs", r[2])
+	st_local("fx_vrs", r[3])
+}
+
+// 1 while verify runs an original.
+real scalar _fx_vin()
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_vin_v")) == NULL) return(0)
 	return(*p)
+}
+
+void _fx_vinset(real scalar on)
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_vin_v")) == NULL) p = crexternal("_fx_vin_v")
+	*p = on
+}
+
+// Text for a FASTATA_COUNTS field: no commas, quotes or line breaks, at most 200 characters.
+string scalar _fx_vclean(string scalar s)
+{
+	string scalar t
+
+	t = subinstr(subinstr(subinstr(s, ",", ";", .), char(34), "'", .), char(96), "'", .)
+	t = subinstr(subinstr(t, char(10), " ", .), char(13), " ", .)
+	return(usubstr(t, 1, 200))
+}
+
+// Metadata lines of the current frame: N, sortedby sb, data label dl, every variable (position,
+// name, type, format, value label, variable label), every characteristic (notes included) of
+// _dta and of the variables, and the definition of every value label in labs.
+string colvector _fx_vmeta(string scalar sb, string scalar dl, string rowvector labs)
+{
+	string colvector out, names, txt
+	string rowvector vars
+	real colvector vals
+	real scalar i, j
+
+	out = ("N " + strofreal(st_nobs(), "%20.0f")) \ ("sortedby " + sb) \ ("data label " + dl)
+	vars = st_nvar() ? st_varname(1..st_nvar()) : J(1, 0, "")
+	for (i = 1; i <= cols(vars); i++) {
+		out = out \ ("variable " + strofreal(i) + " " + vars[i] + " " + st_vartype(i) + " "
+			+ st_varformat(i) + " [" + st_varvaluelabel(i) + "] " + st_varlabel(i))
+	}
+	vars = "_dta", vars
+	for (i = 1; i <= cols(vars); i++) {
+		names = st_dir("char", vars[i], "*")
+		for (j = 1; j <= rows(names); j++) {
+			out = out \ ("char " + vars[i] + "[" + names[j] + "] "
+				+ st_global(vars[i] + "[" + names[j] + "]"))
+		}
+	}
+	for (i = 1; i <= cols(labs); i++) {
+		st_vlload(labs[i], vals, txt)
+		for (j = 1; j <= rows(vals); j++) {
+			out = out \ ("label " + labs[i] + " " + strofreal(vals[j], "%21x") + " " + txt[j])
+		}
+	}
+	return(out)
+}
+
+// "" when a and b hold the same lines (in any order), else a line of one missing from the other.
+// (No sort: sorting can draw from the sort random-number generator.)
+string scalar _fx_vlinediff(string colvector a, string colvector b)
+{
+	transmorphic scalar ca
+	real scalar i, n
+
+	ca = asarray_create()
+	asarray_notfound(ca, 0)
+	for (i = 1; i <= rows(a); i++) asarray(ca, a[i], asarray(ca, a[i]) + 1)
+	for (i = 1; i <= rows(b); i++) {
+		n = asarray(ca, b[i])
+		if (n == 0) return("original has: " + b[i])
+		asarray(ca, b[i], n - 1)
+	}
+	for (i = 1; i <= rows(a); i++) {
+		if (asarray(ca, a[i]) > 0) return("fast path has: " + a[i])
+	}
+	return("")
+}
+
+// Names of the value labels defined in the current frame (r() is kept).
+string rowvector _fx_vlabs()
+{
+	string rowvector l
+
+	stata("_return hold __fx_vr")
+	stata("quietly label dir")
+	l = tokens(st_global("r(names)"))
+	stata("_return restore __fx_vr")
+	return(l)
+}
+
+// Compares the current frame (the fast path's result) with frame snap (the original's result):
+// metadata (_fx_vmeta, with locals sbf, dlf, sbo, dlo), then values: strings and missing codes
+// exactly, numbers bitwise (the sign of zero included), or within reldif tol when tol > 0. rspec
+// lists "name value" pairs of the fast path's r() scalars, compared with r() as the original
+// left it. Sets local fx_vdiff to "" or a short description of the first difference.
+void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
+{
+	string scalar cur, d
+	string colvector sa, sb
+	string rowvector rs
+	real colvector a, b, ma, mb, z, nm
+	real matrix rv
+	real scalar j, k, str
+
+	d = ""
+	rs = tokens(rspec)
+	for (k = 1; k + 1 <= cols(rs); k = k + 2) {
+		rv = st_numscalar("r(" + rs[k] + ")")
+		if (rows(rv) == 0) {
+			d = "r(" + rs[k] + ") not set by the original"
+			break
+		}
+		if (rv != strtoreal(rs[k + 1])) {
+			d = "r(" + rs[k] + ") " + rs[k + 1] + " vs " + strofreal(rv, "%20.0g")
+			break
+		}
+	}
+	cur = st_framecurrent()
+	if (d == "") {
+		sa = _fx_vmeta(st_local("sbf"), st_local("dlf"), _fx_vlabs())
+		st_framecurrent(snap)
+		sb = _fx_vmeta(st_local("sbo"), st_local("dlo"), _fx_vlabs())
+		st_framecurrent(cur)
+		d = _fx_vlinediff(sa, sb)
+	}
+	if (d == "") {
+		for (j = 1; j <= st_nvar(); j++) {
+			str = st_isstrvar(j)
+			if (str) sa = st_sdata(., j)
+			else a = st_data(., j)
+			st_framecurrent(snap)
+			if (str) sb = st_sdata(., j)
+			else b = st_data(., j)
+			st_framecurrent(cur)
+			if (str) {
+				if (sa != sb) d = "strings of " + st_varname(j) + " (" + strofreal(sum(sa :!= sb), "%20.0f") + " obs)"
+			}
+			else if (tol == 0) {
+				if (a != b) d = "values of " + st_varname(j) + " (" + strofreal(sum(a :!= b), "%20.0f") + " obs)"
+				else {
+					z = selectindex(a :== 0)
+					if (length(z)) {
+						if (any(strofreal(a[z], "%21x") :!= strofreal(b[z], "%21x"))) {
+							d = "sign of zero in " + st_varname(j)
+						}
+					}
+				}
+			}
+			else {
+				ma = a :>= .
+				mb = b :>= .
+				if (ma != mb) d = "missing values of " + st_varname(j)
+				else {
+					if (any(select(a, ma) :!= select(b, mb))) d = "missing codes of " + st_varname(j)
+					else {
+						nm = selectindex(!ma)
+						if (length(nm)) {
+							if (max(reldif(a[nm], b[nm])) > tol) {
+								d = ("values of " + st_varname(j) + " beyond the tolerance (max reldif "
+									+ strofreal(max(reldif(a[nm], b[nm])), "%9.2e") + ")")
+							}
+						}
+					}
+				}
+			}
+			if (d != "") break
+		}
+	}
+	st_local("fx_vdiff", _fx_vclean(d))
 }
 
 // ---------------------------------------------------------------------------- counters
 
+// Counts a call of cmd: kind fast, fallback, or verify_ok, verify_mismatch, verify_skipped. Sets
+// locals fx_skip (1: a call that an original makes while verify runs it, not counted) and
+// fx_vdrop (1: a fallback after gate took a snapshot, which is no longer needed).
 void _fx_count(string scalar cmd, string scalar kind, string scalar why)
 {
 	pointer(transmorphic scalar) scalar pc, pw
 	real rowvector v
 
+	st_local("fx_skip", "0")
+	st_local("fx_vdrop", "0")
+	if (_fx_vin()) {
+		st_local("fx_skip", "1")
+		return
+	}
+	if (substr(kind, 1, 7) == "verify_") {
+		pc = _fx_ext("_fx_vcnt")
+		v = asarray_contains(*pc, cmd) ? asarray(*pc, cmd) : (0, 0, 0)
+		if (kind == "verify_ok") v[1] = v[1] + 1
+		else if (kind == "verify_mismatch") v[2] = v[2] + 1
+		else v[3] = v[3] + 1
+		asarray(*pc, cmd, v)
+		return
+	}
 	pc = _fx_ext("_fx_cnt")
 	pw = _fx_ext("_fx_why")
 	v = asarray_contains(*pc, cmd) ? asarray(*pc, cmd) : (0, 0)
@@ -578,22 +924,32 @@ void _fx_count(string scalar cmd, string scalar kind, string scalar why)
 	else {
 		v[2] = v[2] + 1
 		asarray(*pw, cmd, why)
+		if (findexternal("_fx_vrec") != NULL) {
+			rmexternal("_fx_vrec")
+			st_local("fx_vdrop", "1")
+		}
 	}
 	asarray(*pc, cmd, v)
 }
 
-// Sets locals fx_nfast, fx_nfb and fx_last for cmd.
+// Sets locals fx_nfast, fx_nfb and fx_last for cmd, and its verify-mode counts fx_vok, fx_vmis
+// and fx_vskip.
 void _fx_count_get(string scalar cmd)
 {
-	pointer(transmorphic scalar) scalar pc, pw
-	real rowvector v
+	pointer(transmorphic scalar) scalar pc, pw, pv
+	real rowvector v, w
 
 	pc = _fx_ext("_fx_cnt")
 	pw = _fx_ext("_fx_why")
+	pv = _fx_ext("_fx_vcnt")
 	v = asarray_contains(*pc, cmd) ? asarray(*pc, cmd) : (0, 0)
+	w = asarray_contains(*pv, cmd) ? asarray(*pv, cmd) : (0, 0, 0)
 	st_local("fx_nfast", strofreal(v[1], "%20.0f"))
 	st_local("fx_nfb", strofreal(v[2], "%20.0f"))
 	st_local("fx_last", asarray_contains(*pw, cmd) ? asarray(*pw, cmd) : "")
+	st_local("fx_vok", strofreal(w[1], "%20.0f"))
+	st_local("fx_vmis", strofreal(w[2], "%20.0f"))
+	st_local("fx_vskip", strofreal(w[3], "%20.0f"))
 }
 
 string rowvector _fx_cmds()
@@ -925,15 +1281,18 @@ void _fx_rmruntime(string scalar rdir)
 	(void) _rmdir(d)
 }
 
-// For fastata status, sets per replaced command c: fx_orig_c (path of the original), fx_ver_c
-// (whether the gate accepts it), fx_nfast_c, fx_nfb_c and fx_last_c (session counters).
-void _fx_status()
+// For fastata status, sets fx_mode (the mode; envm: env FASTATA_MODE) and per replaced command
+// c: fx_orig_c (path of the original), fx_ver_c (whether the gate accepts it), fx_nfast_c,
+// fx_nfb_c and fx_last_c (session counters), fx_vok_c, fx_vmis_c and fx_vskip_c (verify mode:
+// verified, mismatched, skipped calls).
+void _fx_status(string scalar envm)
 {
 	string rowvector cm, v, first
 	string colvector keys
 	string matrix g
 	real scalar i, j, nok
 
+	st_local("fx_mode", _fx_getmode(envm))
 	cm = _fx_cmds()
 	g = _fx_gates()
 	for (i = 1; i <= cols(cm); i++) {
@@ -960,6 +1319,9 @@ void _fx_status()
 		st_local("fx_nfast_" + cm[i], st_local("fx_nfast"))
 		st_local("fx_nfb_" + cm[i], st_local("fx_nfb"))
 		st_local("fx_last_" + cm[i], st_local("fx_last"))
+		st_local("fx_vok_" + cm[i], st_local("fx_vok"))
+		st_local("fx_vmis_" + cm[i], st_local("fx_vmis"))
+		st_local("fx_vskip_" + cm[i], st_local("fx_vskip"))
 	}
 }
 

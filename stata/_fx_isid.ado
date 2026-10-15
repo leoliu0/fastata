@@ -8,6 +8,7 @@ program _fx_isid
 	local caller = _caller()
 	local rc0 = c(rc)
 	version 16
+	local cmdline `"`0'"'
 	_fx gate isid
 	if `fx_ok' {
 		local fx_why
@@ -27,18 +28,10 @@ program _fx_isid
 		}
 		if "`fx_why'" == "" {
 			_fx count isid fast
-			if !`mok' & `fx_nmiss' > 0 {
-				_format_list `varlist', plural(variable)
-				di as err `"`s(msg)' should never be missing"'
-				exit 459
-			}
-			if `fx_nuniq' < _N {
-				_format_list `varlist', plural(variable)
-				local does = cond(`s(k)'==1, "does", "do")
-				di as err `"`s(msg)' `does' not uniquely identify the observations"'
-				exit 459
-			}
-			if "`sort'" != "" {
+			local err
+			if !`mok' & `fx_nmiss' > 0 local err missing
+			else if `fx_nuniq' < _N local err unique
+			else if "`sort'" != "" {
 				local list : sortedby
 				local sorted 1
 				local i 1
@@ -55,6 +48,22 @@ program _fx_isid
 					di as txt `"(data now sorted by {bf:`varlist'})"'
 				}
 			}
+			local rc = cond("`err'" != "", 459, 0)
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify isid `caller' `rc0' `rc' "" "" "" 0 "" `"`cmdline'"'
+				local rc `fx_vrc'
+			}
+			if "`err'" == "missing" {
+				_format_list `varlist', plural(variable)
+				di as err `"`s(msg)' should never be missing"'
+			}
+			else if "`err'" == "unique" {
+				_format_list `varlist', plural(variable)
+				local does = cond(`s(k)'==1, "does", "do")
+				di as err `"`s(msg)' `does' not uniquely identify the observations"'
+			}
+			if `rc' exit `rc'
 			exit
 		}
 	}
