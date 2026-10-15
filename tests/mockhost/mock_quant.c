@@ -135,7 +135,7 @@ static void tests_quant(void) {
         int vars[] = {V_X1, V_W, -1};
         int rc = call(vars, args);
         const char *fb = macro_get("_fx_fallback");
-        if (rc || !fb || strcmp(fb, "weights")) fail("quant noninteger fweight falls back", fb ? fb : "no fallback");
+        if (rc || !fb || strcmp(fb, "weight values")) fail("quant noninteger fweight falls back", fb ? fb : "no fallback");
         else pass("quant noninteger fweight falls back");
     }
     reset_outputs();

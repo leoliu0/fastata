@@ -23,7 +23,7 @@
 //! largest category assigned).
 //!
 //! Falls back (the original then gives its error or result): a negative weight, or a noninteger
-//! frequency weight, in any observation [weights]; xtile with nq > fx_n0 + 1, an empty sample,
+//! frequency weight, in any observation [weight values]; xtile with nq > fx_n0 + 1, an empty sample,
 //! pctile/plist with more percentiles than observations [error]; both -0 and +0 in the sample
 //! (`_pctile` orders them as ties) [signed zero]; a weighted percentile within the band where
 //! `_pctile`'s tolerance or summation order decides [weighted tolerance].
@@ -161,6 +161,9 @@ struct Chunk {
     ws: Vec<f64>,
     neg_weight: bool,
     nonint_fw: bool,
+    /// The sample has x = -0 / x = +0.
+    neg_zero: bool,
+    pos_zero: bool,
 }
 
 /// Rows per chunk of the gathering and category passes, at least.
@@ -181,8 +184,7 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
     let t = spec.touse.then(|| &cols[nv - 1]);
     let fw = spec.wtype == Wtype::Fw;
 
-    // Sample membership of observation i: Some(weight) (1 without weights) if in the if/in
-    // sample, plus whether x is nonmissing.
+    // Observation i is in the if/in sample: Some(its weight) (1 without weights), else None.
     let ifin = |i: usize| -> Option<f64> {
         if t.is_some_and(|t| t[i] == 0.0) {
             return None;
@@ -213,7 +215,10 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
             let Some(wi) = ifin(i) else { continue };
             ch.n0 += 1;
             if x[i] < miss {
-                ch.keys.push(key(x[i]));
+                let k = key(x[i]);
+                ch.neg_zero |= k == NEG_ZERO;
+                ch.pos_zero |= k == POS_ZERO;
+                ch.keys.push(k);
                 if hasw {
                     ch.ws.push(wi);
                 }
@@ -225,11 +230,8 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
         Ok(ch)
     })?;
 
-    if chunks.iter().any(|c| c.neg_weight) {
-        return Err(Error::fallback("weights"));
-    }
-    if chunks.iter().any(|c| c.nonint_fw) {
-        return Err(Error::fallback("weights"));
+    if chunks.iter().any(|c| c.neg_weight || c.nonint_fw) {
+        return Err(Error::fallback("weight values"));
     }
     let n0: usize = chunks.iter().map(|c| c.n0).sum();
     let n: usize = chunks.iter().map(|c| c.keys.len()).sum();
@@ -240,10 +242,7 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
     {
         return Err(Error::fallback("error"));
     }
-    let has = |k: u64| {
-        chunks.iter().any(|c| if hasw { c.keys.contains(&k) } else { c.keys.binary_search(&k).is_ok() })
-    };
-    if has(NEG_ZERO) && has(POS_ZERO) {
+    if chunks.iter().any(|c| c.neg_zero) && chunks.iter().any(|c| c.pos_zero) {
         return Err(Error::fallback("signed zero"));
     }
 
@@ -543,10 +542,10 @@ mod tests {
         let mut w = vec![1.0; 10];
         w[9] = -1.0;
         let d = Data { x: x.clone(), w: Some(w.clone()), t: Some(vec![1.0; 10]) };
-        assert_eq!(fb(&d, &spec(Kind::Xtile, 2, Wtype::Aw, false, true)).msg, "weights");
+        assert_eq!(fb(&d, &spec(Kind::Xtile, 2, Wtype::Aw, false, true)).msg, "weight values");
         w[9] = 1.5;
         let d = Data { x: x.clone(), w: Some(w), t: None };
-        assert_eq!(fb(&d, &spec(Kind::Xtile, 2, Wtype::Fw, false, false)).msg, "weights");
+        assert_eq!(fb(&d, &spec(Kind::Xtile, 2, Wtype::Fw, false, false)).msg, "weight values");
         assert!(compute(&memio(&d), &spec(Kind::Xtile, 2, Wtype::Aw, false, false), 1).is_ok());
         // nq > n0 + 1; no nonmissing x.
         let d = Data { x: x.clone(), w: None, t: None };

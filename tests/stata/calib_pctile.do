@@ -131,6 +131,46 @@ foreach n of local ns {
 	}
 }
 
+* Near the switch of _pctile's weighted tolerance: j unit weights then one weight t placed so
+* that W(j) - P = s*(1+e)*1e-7*W. Undetermined cells (|e| below about 1e-6) fall back; the
+* others must match.
+capture program drop cb_tol
+program cb_tol
+	args p
+	quietly _pctile x [aw=wt] if t, p(`p')
+	_fx_call x wt t, quant "phase=compute" "threads=$CB_THREADS" "kind=plist" "p=`p'" "wtype=aw" "touse=1"
+	if `fx_plugrc' {
+		di as err `"quant failed: `fx_errmsg'"'
+		exit `fx_plugrc'
+	}
+	if `"`fx_fallback'"' != "" {
+		global CB_FB_awtol = $CB_FB_awtol + 1
+		exit
+	}
+	_fx store `fx_token' double cb_q
+	mata: cb_compare(1, "awtol")
+	drop cb_q
+end
+local defs `defs' awtol
+global CB_N_awtol 0
+global CB_BAD_awtol 0
+global CB_FB_awtol 0
+quietly replace x = _n
+quietly gen double wt = 1
+foreach j in 1 2 3 7 {
+	scalar cb_n = `j'
+	quietly replace t = _n <= `j' + 1
+	quietly replace wt = 1
+	foreach p in 10.00001 25 33.333 50 80 90 {
+		foreach s in -1 1 {
+			foreach e in -.5 -1e-2 -1e-4 -3e-6 -1e-6 -3e-7 -1e-7 -1e-8 -1e-10 0 1e-10 1e-8 1e-7 3e-7 1e-6 3e-6 1e-4 1e-2 .5 {
+				quietly replace wt = `j'/(`p'/100 + `s'*(1+`e')*1e-7) - `j' in `=`j'+1'
+				cb_tol `p'
+			}
+		}
+	}
+}
+
 local tot 0
 foreach d of local defs {
 	di as txt "CALIB pctile `d': cells=${CB_N_`d'} mismatches=${CB_BAD_`d'} fallback=${CB_FB_`d'}"

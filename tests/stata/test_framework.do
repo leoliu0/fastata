@@ -213,7 +213,7 @@ local rt2 `"`fx_rt'"'
 assert strpos(`"`rt2'"', "a b/fastata/") > 0
 fx_where egen `"`rt2'egen.ado"'
 fx_both "egen t = tag(g s)" , expect(egen fallback) allr
-fx_both "xtile q = x1, nq(10)" , expect(xtile fallback) allr
+fx_both "xtile q = x1, nq(10)" , expect(xtile fast)
 fx_both "tostring zi, gen(zs)" , expect(tostring fallback) allr
 fastata off
 _fx rmruntime `"`rt2'"'
