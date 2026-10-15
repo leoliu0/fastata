@@ -211,6 +211,44 @@ def compare_pairs(pkg: str, x: str, y: str, files: list[str]) -> dict[str, tuple
     return out
 
 
+def units(text: str, logish: bool) -> list[str]:
+    """A normalised text split into command blocks (log output: each starts at a ". " command
+    echo) or lines."""
+    if not logish:
+        return text.splitlines()
+    out: list[str] = []
+    for ln in text.splitlines():
+        if ln.startswith(". ") or not out:
+            out.append(ln)
+        else:
+            out[-1] += "\n" + ln
+    return out
+
+
+def three_way(rel: str, texts: dict[str, str], roots: dict[str, str]) -> tuple[str, str] | None:
+    """File verdict from a unit-by-unit comparison of arms A, F and B, when all three have the
+    same number of units: a unit that differs between A and B is a tie unit; F is judged on the
+    other units. None when the units do not line up."""
+    logish = rel == WRAPPER_ID or Path(rel).suffix.lower() in (".log", ".smcl")
+    u = {k: units(normalize(t, roots[k]), logish) for k, t in texts.items()}
+    if not (len(u["A"]) == len(u["F"]) == len(u["B"])):
+        return None
+    ties = near = 0
+    for i, (a, f, b) in enumerate(zip(u["A"], u["F"], u["B"])):
+        if a == f:
+            continue
+        if a != b:
+            ties += 1
+            continue
+        v, why = cmp_text(a + "\n", f + "\n", "", "")
+        if v == "DIFF":
+            return "DIFF", f"unit {i + 1} of {len(u['A'])} ({a.splitlines()[0][:60]!r}): {why}"
+        near += v == "NEAR"
+    if near:
+        return "NEAR", f"{near} unit(s) within tolerance, {ties} tie unit(s)"
+    return ("TIE", f"{ties} of {len(u['A'])} units differ between A and B; F equals A elsewhere") if ties else ("SAME", "")
+
+
 def file_verdict(af: tuple[str, str], ab: tuple[str, str] | None) -> str:
     """Combines A-vs-F and A-vs-B pair verdicts into SAME, NEAR, TIE, DIFF, SKIP or NEEDB."""
     v = af[0]
@@ -229,6 +267,9 @@ def compare(pkg: str, force: bool = False) -> dict:
         return state.stage(pkg, "compare") or {}
     if not (state.ok(pkg, "run_A") and state.ok(pkg, "run_F")):
         return {"ok": False, "reason": "arms A and F have not both finished"}
+    if not (runner.arm_dir(pkg, "A").exists() and runner.arm_dir(pkg, "F").exists()):
+        return {"ok": False, "reason": "arm directories are gone (deleted after comparing); "
+                "rerun with repl reset <pkg> --from run, then repl pipeline --only <pkg>"}
     have_b = state.ok(pkg, "run_B") and runner.arm_dir(pkg, "B").exists()
     files = changed_files(pkg, "A") | changed_files(pkg, "F") | {WRAPPER_ID}
     if have_b:
@@ -239,12 +280,25 @@ def compare(pkg: str, force: bool = False) -> dict:
     if pending and not have_b:
         return {"ok": False, "needb": True, "pending": len(pending)}
     ab = compare_pairs(pkg, "A", "B", pending) if pending else {}
+    refined: dict[str, tuple[str, str]] = {}
+    for f in pending:
+        if kind_of(f) == "text" and ab[f][0] not in ("SAME", "ERR") and af[f][0] != "ERR":
+            texts, roots = {}, {}
+            for arm in "AFB":
+                p, roots[arm] = _read_side(pkg, arm, f)
+                texts[arm] = p.read_text(errors="replace") if p else ""
+                if f == WRAPPER_ID:
+                    texts[arm] = runner.log_region(texts[arm]) or ""
+            r = three_way(f, texts, roots)
+            if r:
+                refined[f] = r
     rows = []
     counts = {k: 0 for k in ("SAME", "NEAR", "TIE", "DIFF", "SKIP", "ERR")}
     for f in files_l:
-        v = "ERR" if af[f][0] == "ERR" else file_verdict(af[f], ab.get(f))
+        v = refined[f][0] if f in refined else "ERR" if af[f][0] == "ERR" else file_verdict(af[f], ab.get(f))
         counts[v] += 1
-        rows.append({"file": f, "verdict": v, "af": list(af[f]), "ab": list(ab[f]) if f in ab else None})
+        rows.append({"file": f, "verdict": v, "af": list(af[f]), "ab": list(ab[f]) if f in ab else None,
+                     "units": refined[f][1] if f in refined else None})
     (runner.results_dir(pkg) / "compare.json").write_text(json.dumps(rows, indent=1))
     verdict = "PASS" if counts["DIFF"] == 0 and counts["ERR"] == 0 else "FAIL"
     return state.record(pkg, "compare", True, verdict=verdict, counts=counts,

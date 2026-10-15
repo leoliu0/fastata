@@ -51,54 +51,56 @@ end
 
 program _fxrepl_cmp1
 	args fa fb
-	foreach f in a b {
-		frame `f`f'' {
-			quietly ds
-			local v`f' `r(varlist)'
-			local s`f' : sortedby
-			local n`f' = _N
-			local d`f' : data label
-			foreach v of local v`f' {
-				local t`f'_`v' : type `v'
-				local f`f'_`v' : format `v'
-				local l`f'_`v' : variable label `v'
-				local vl`f'_`v' : value label `v'
-			}
-		}
-	}
-	c_local fx_verdict DIFF
-	if `na' != `nb' {
-		c_local fx_detail "N differs (`na' vs `nb')"
-		exit
-	}
-	if "`va'" != "`vb'" {
-		c_local fx_detail "variables differ"
-		exit
-	}
-	if "`sa'" != "`sb'" {
-		c_local fx_detail "sort order differs (`sa' vs `sb')"
-		exit
-	}
-	if `"`da'"' != `"`db'"' {
-		c_local fx_detail "data label differs"
-		exit
-	}
-	foreach v of local va {
-		foreach p in t f vl l {
-			if `"``p'a_`v''"' != `"``p'b_`v''"' {
-				local what = cond("`p'" == "t", "type", cond("`p'" == "f", "format",	///
-					cond("`p'" == "vl", "value label name", "variable label")))
-				c_local fx_detail "`v': `what' differs"
-				exit
-			}
-		}
-	}
-	mata: _fxrepl_cmpall("`fa'", "`fb'")
+	mata: _fxrepl_cmphead("`fa'", "`fb'")
+	if "`fx_verdict'" == "" mata: _fxrepl_cmpall("`fa'", "`fb'")
 	c_local fx_verdict `fx_verdict'
 	c_local fx_detail `"`fx_detail'"'
 end
 
 mata:
+// N, variables, sort order, data label, and per variable: type, format, value-label name,
+// variable label. Sets fx_verdict DIFF and fx_detail on the first difference.
+string matrix _fxrepl_head(string scalar fr)
+{
+	string scalar cur
+	string matrix out
+	real scalar i
+
+	cur = st_framecurrent()
+	st_framecurrent(fr)
+	stata("local _fxs : sortedby")
+	stata("local _fxd : data label")
+	out = ("", "N", strofreal(st_nobs(), "%20.0f")) \ ("", "sort order", st_local("_fxs")) \
+		("", "data label", st_local("_fxd")) \ ("", "variables", invtokens(st_nvar() ? st_varname(1..st_nvar()) : J(1, 0, "")))
+	for (i = 1; i <= st_nvar(); i++) {
+		out = out \ (st_varname(i), "type", st_vartype(i)) \ (st_varname(i), "format", st_varformat(i)) \
+			(st_varname(i), "value label name", st_varvaluelabel(i)) \
+			(st_varname(i), "variable label", st_varlabel(i))
+	}
+	st_framecurrent(cur)
+	return(out)
+}
+
+// Sets fx_verdict DIFF and fx_detail when N, the variables, the sort order, the data label or a
+// variable's type, format, value-label name or label differ; fx_verdict "" otherwise.
+void _fxrepl_cmphead(string scalar fa, string scalar fb)
+{
+	string matrix a, b
+	real scalar i
+
+	a = _fxrepl_head(fa)
+	b = _fxrepl_head(fb)
+	st_local("fx_verdict", "")
+	for (i = 1; i <= rows(a); i++) {
+		if (a[i, 3] != b[i, 3]) {
+			st_local("fx_verdict", "DIFF")
+			st_local("fx_detail", (a[i, 1] != "" ? a[i, 1] + ": " : "") + a[i, 2] + " differs" +
+				(i <= 2 ? " (" + a[i, 3] + " vs " + b[i, 3] + ")" : ""))
+			return
+		}
+	}
+}
+
 string colvector _fxrepl_meta(string scalar fr)
 {
 	string scalar cur

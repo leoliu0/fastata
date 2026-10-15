@@ -70,3 +70,18 @@ def test_aggregate_calls(tmp_path):
     assert a["egen"]["fast"] == 1 and a["egen"]["fallback"] == 1
     assert a["isid"]["last_reason"] == "string blanks, x"
     assert a["xtile"]["fast"] == 0
+
+
+def test_three_way():
+    from repl.compare import three_way
+
+    base = ". sum x\n  mean 1.5\n. sort g\n. list in 1\n  tie 7\n"
+    t = {"A": base, "B": base.replace("tie 7", "tie 8"), "F": base}
+    r = {"A": "", "B": "", "F": ""}
+    assert three_way("x.log", t, r)[0] == "SAME"
+    assert three_way("x.log", {**t, "F": base.replace("tie 7", "tie 9")}, r)[0] == "TIE"
+    v, why = three_way("x.log", {**t, "F": base.replace("1.5", "1.6")}, r)
+    assert v == "DIFF" and "sum x" in why
+    assert three_way("x.log", {**t, "F": base.replace("1.5", "1.5000000000001")}, r)[0] == "NEAR"
+    assert three_way("x.log", {**t, "F": base + ". extra\n"}, r) is None
+    assert three_way("t.csv", {"A": "a,1\nb,2\n", "B": "a,1\nb,3\n", "F": "a,2\nb,2\n"}, r)[0] == "DIFF"

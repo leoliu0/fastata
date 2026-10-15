@@ -32,6 +32,7 @@ WRAPPER = "_fxrepl_wrapper.do"
 WRAPPER_LOG = "_fxrepl_wrapper.log"
 HOME = "_fxrepl_home"
 CALLS = "_fxrepl_calls.csv"
+PERSONAL = "_fxrepl_personal"
 TIMEOUT_MIN = {"A": 60, "B": 90, "F": 90}
 SORTSEED = 20261015
 PROCESSORS = 8
@@ -78,14 +79,18 @@ def manifest(root: Path) -> dict[str, list[int]]:
 
 
 def wrapper_text(pkg: str, arm: str, master: Path, cwd: Path | None = None) -> str:
+    """The do-file each arm runs: PLUS is the package's dependencies (read-only), PERSONAL a
+    writable directory of the arm (packages save schemes and settings there)."""
     deps = deps_dir(pkg)
+    personal = arm_dir(pkg, arm) / PERSONAL
     lines = [
         f"* fastata replication harness: arm {arm} of {pkg}",
         "clear all",
         "set more off",
         f"set processors {PROCESSORS}",
         f"sysdir set PLUS {sq(str(deps / 'plus') + '/')}",
-        f"sysdir set PERSONAL {sq(str(deps / 'personal') + '/')}",
+        f"sysdir set PERSONAL {sq(str(personal) + '/')}",
+        "mata: mata mlib index",
     ]
     if arm == "B":
         lines.append(f"set sortseed {SORTSEED}")
@@ -187,6 +192,9 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
         return state.record(pkg, stage_name, False, reason="no master do-file")
     root = fresh_copy(pkg, arm)
     patched = apply_patches(root, meta)
+    for d in meta.get("mkdirs", []):
+        (root / d).mkdir(parents=True, exist_ok=True)
+    (root / PERSONAL).mkdir()
     pre = manifest(root)
     res = results_dir(pkg)
     (res / f"arm_{arm}_manifest.json").write_text(json.dumps({"files": pre, "patched": patched}))

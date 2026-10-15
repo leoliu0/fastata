@@ -119,7 +119,9 @@ def render(count_on: str = "fast") -> str:
         if e:
             stage_name, _, why = e.partition(": ")
             why = re.sub(r"\S*[/\\]\S*", "<path>", why)
-            excl[f"{stage_name}: {why[:70]}"] += 1
+            why = re.sub(r"\(\d+ vs \d+ lines\)", "", why)
+            for part in why.split("; "):
+                excl[f"{stage_name}: {part.strip()[:70]}"] += 1
     L += ["", "## Packages that dropped out", "", "|stage: reason|packages|", "|---|---:|"]
     for k, n in excl.most_common():
         L.append(f"|{k.replace('|', '/')}|{n}|")
