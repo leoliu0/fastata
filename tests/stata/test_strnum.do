@@ -58,6 +58,8 @@ quietly {
 	gen strL slr = sr
 	gen strL slong = cond(mod(_n, 2), 300 * "word ", string(_n))
 	gen strL slnum = cond(_n == 3, 70 * "1", string(_n))
+	gen str6 spm = cond(mod(_n, 3) == 0, ".a", cond(mod(_n, 3) == 1, string(_n) + "%", ""))
+	gen str6 sbf = cond(_n == 9, "1e39", string(_n))
 	label variable sa "a label on sa"
 	label variable sb "sb: numbers with spaces"
 	note sb: a note on sb
@@ -158,6 +160,9 @@ ts `"destring sc, gen(nc) ignore("$$,,")"' fast destring
 ts `"destring sn, gen(nn) ignore("-") force"' fast destring
 ts `"destring sn, gen(nn) ignore("A{N}") force"' fast destring
 ts "destring sx*, replace" fast destring
+ts "destring spm, replace percent" fast destring
+ts "destring spm, gen(np) percent float" fast destring
+ts "destring sbf, replace" fast destring
 ts "destring sa sb sc, gen(n1-n3) force" fast destring
 ts "destring sk, replace" fast destring
 ts "destring sr, gen(nr) force" fast destring
@@ -181,6 +186,7 @@ ts "destring sh, replace" fallback destring
 ts "destring su, replace force" fallback destring
 ts "destring so, replace" fallback destring
 ts "destring slnum, replace" fallback destring
+ts "destring sbf, replace float" fallback destring
 ts "version 13: destring sa, replace" fallback destring
 ts "destring sa" fallback destring
 ts "destring sa, gen(x) replace" fallback destring

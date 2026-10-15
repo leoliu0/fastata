@@ -17,6 +17,7 @@
 version 16
 clear all
 set more off
+set linesize 255
 fx_setup
 quietly fastata on
 _fx threads
