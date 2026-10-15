@@ -39,6 +39,8 @@ quietly {
 	gen double w = runiform() + .5
 	gen str9 sn = cond(runiform() < .01, "NA", string(round(runiform()*1e5, .01), "%9.2f"))
 	gen long z = floor(runiform()*1e8)
+	* unique but not in ascending order: isid takes the hash path
+	gen long idr = _N + 1 - id
 }
 frame rename default D10
 frame copy D10 D10s
@@ -120,10 +122,14 @@ fx_scen K1 D10  isid 20 "" "" "isid id"
 fx_scen K2 D10  duplicates 10 "byte" "dt" "duplicates tag g year, gen(dt)"
 fx_scen K3 D10  duplicates 8 "" "" "duplicates drop g year, force"
 fx_scen K4 D10  duplicates 10 "" "" "duplicates report g"
+fx_scen K1b D10 isid 20 "" "" "isid idr"
+fx_scen K5 D10  isid 8 "" "" "isid sn id"
+fx_scen K6 D10  duplicates 20 "" "" "duplicates examples g year if x1 > 3.7"
 fx_scen Q1 D10  xtile 20 "byte"  "q" "xtile q = x1, nq(10)"
 fx_scen Q2 D10  pctile 10 "" "" "pctile double p = x1, nq(100)"
 fx_scen S1 D10  destring 2 "double" "sn2" "destring sn, replace force"
 fx_scen S2 D10  tostring 2 "str8" "z2" "tostring z, replace"
+fx_scen S1g D10 destring . "double" "n2" "destring sn, gen(n2) force"
 
 * ------------------------------------------------------------------------ gates and RESULTS.md
 frame change res
