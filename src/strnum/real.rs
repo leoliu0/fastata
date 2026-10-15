@@ -139,19 +139,22 @@ fn is_uspace(b: u8) -> bool {
     matches!(b, 9..=13 | 32)
 }
 
-/// What `destring.ado` (2.4.4, caller >= 14) does to one value before `real()`. `s` is pure
-/// ASCII; `ignore` lists the characters to remove (each its own pass, in order). Writes the
-/// string `real()` sees to `out` and returns whether the value counts as missing (`""`, `"."`
-/// or `".a"`..`".z"` after removal and trimming).
-pub fn prep(s: &[u8], ignore: &[u8], dpcomma: bool, out: &mut Vec<u8>) -> bool {
+/// What `destring.ado` (2.4.4) does to one value before `real()`. `s` is pure ASCII; `ignore`
+/// lists the characters to remove (each its own pass, in order). Writes the string `real()` sees
+/// to `out` and returns whether the value counts as missing (`""`, `"."` or `".a"`..`".z"` after
+/// removal and trimming). `old` (caller < 14) trims with `strtrim()`, which removes only spaces
+/// from ASCII text (calibrated), instead of `ustrtrim()`; its `regexr(s, "^0+", "0")` equals
+/// `ustrregexrf()` on ASCII text (calibrated).
+pub fn prep(s: &[u8], ignore: &[u8], dpcomma: bool, old: bool, out: &mut Vec<u8>) -> bool {
     out.clear();
     if ignore.is_empty() {
         out.extend_from_slice(s);
     } else {
         out.extend(s.iter().filter(|b| !ignore.contains(b)));
     }
-    let a = out.iter().position(|&b| !is_uspace(b)).unwrap_or(out.len());
-    let e = out.iter().rposition(|&b| !is_uspace(b)).map_or(a, |i| i + 1);
+    let space = |b: u8| if old { b == b' ' } else { is_uspace(b) };
+    let a = out.iter().position(|&b| !space(b)).unwrap_or(out.len());
+    let e = out.iter().rposition(|&b| !space(b)).map_or(a, |i| i + 1);
     out.truncate(e);
     out.drain(..a);
     let t = &out[..];
@@ -173,7 +176,7 @@ pub fn prep(s: &[u8], ignore: &[u8], dpcomma: bool, out: &mut Vec<u8>) -> bool {
             }
         }
     }
-    // ustrregexrf(s, "^0+", "0")
+    // ustrregexrf(s, "^0+", "0"), or regexr() with old
     let z = out.iter().take_while(|&&b| b == b'0').count();
     if z > 1 {
         out.drain(..z - 1);
@@ -358,23 +361,28 @@ mod tests {
     #[test]
     fn prep_follows_destring() {
         let mut o = Vec::new();
-        assert!(!prep(b" 007 ", b"", false, &mut o));
+        assert!(!prep(b" 007 ", b"", false, false, &mut o));
         assert_eq!(o, b"07");
-        assert!(!prep(b"000", b"", false, &mut o));
+        assert!(!prep(b"000", b"", false, false, &mut o));
         assert_eq!(o, b"0");
-        assert!(prep(b"\t.b\n", b"", false, &mut o));
+        assert!(prep(b"\t.b\n", b"", false, false, &mut o));
         assert_eq!(o, b".b");
-        assert!(prep(b"$", b"$", false, &mut o));
-        assert!(!prep(b"$1,000", b"$,", false, &mut o));
+        assert!(prep(b"$", b"$", false, false, &mut o));
+        assert!(!prep(b"$1,000", b"$,", false, false, &mut o));
         assert_eq!(o, b"1000");
-        assert!(!prep(b"1.234,5", b"", true, &mut o));
+        assert!(!prep(b"1.234,5", b"", true, false, &mut o));
         assert_eq!(o, b"1X234.5");
-        assert!(!prep(b"1,5", b"", true, &mut o));
+        assert!(!prep(b"1,5", b"", true, false, &mut o));
         assert_eq!(o, b"1.5");
-        assert!(!prep(b"1,a", b"", true, &mut o));
+        assert!(!prep(b"1,a", b"", true, false, &mut o));
         assert_eq!(o, b"1,a");
-        assert!(prep(b".", b"", true, &mut o));
+        assert!(prep(b".", b"", true, false, &mut o));
         assert_eq!(o, b".");
+        assert!(!prep(b"\t007 ", b"", false, true, &mut o));
+        assert_eq!(o, b"\t007");
+        assert!(!prep(b" 007 ", b"", false, true, &mut o));
+        assert_eq!(o, b"07");
+        assert!(!prep(b"\t.b", b"", false, true, &mut o));
     }
 
     #[test]

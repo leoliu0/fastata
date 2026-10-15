@@ -7,6 +7,9 @@
 *       space, every two-byte string of bytes 1-127, 50,000 random numeric-looking strings,
 *       20,000 random hexadecimal-looking strings and edge values. Strings the emulation does
 *       not cover (it falls back for them) are counted, not compared.
+*   C3p destring's preparation before real() for callers 14+ and callers 11-13: the bytes
+*       ustrtrim() and strtrim() remove, regexr() against ustrregexrf() for "^0+", and the
+*       plugin's prep + real() ("raw=2") against Stata's own functions, bitwise.
 *   C4  compress after destring: the storage type the plugin picks against generate
 *       double|float = real(s) then compress, for every range boundary +-1, missing codes,
 *       -0, non-integers and all-missing columns.
@@ -160,6 +163,45 @@ quietly count if effb
 local fb2 = r(N)
 di as txt "C3 real(): `=_N' strings, mismatches double `m1', float `m2'; not covered (fallback): double `fb1', float `fb2'"
 local mism = `mism' + `m1' + `m2'
+
+* ----------------------------------------------------------------------------------- C3p
+* destring's preparation before real(), for callers 14+ (ustrtrim, ustrregexrf) and callers
+* older than 14 (strtrim, regexr): the trimmed byte sets, regexr against ustrregexrf, and the
+* plugin's prep + real() (destring "raw=2", old=0|1) against generate double = real(<the same
+* Stata functions>), bitwise, over the C3 strings wrapped in leading zeros and ASCII whitespace.
+local trs
+local trus
+forvalues k = 1/127 {
+	if strtrim(char(`k') + "1") == "1" | strtrim("1" + char(`k')) == "1" local trs `trs' `k'
+	if ustrtrim(char(`k') + "1") == "1" | ustrtrim("1" + char(`k')) == "1" local trus `trus' `k'
+}
+local m3 = ("`trs'" != "32") + ("`trus'" != "9 10 11 12 13 32")
+if `m3' di as err "C3p: strtrim trims [`trs'], ustrtrim trims [`trus']"
+quietly gen strL p = word(`"0 00 000 x x0 x00 00x0 y"', mod(_n, 8) + 1)
+quietly replace p = subinstr(subinstr(p, "x", char(9), .), "y", " ", .)
+quietly replace p = p + 2000 * "0" in 1/5
+quietly gen strL s2 = p + s + word(`"z y x zy xz"', mod(floor(_n / 8), 5) + 1)
+quietly replace s2 = subinstr(subinstr(subinstr(s2, "x", char(9), .), "y", " ", .), "z", "", .) if _n > 5
+quietly replace s2 = p + s if _n <= 5
+quietly gen strL rgx = regexr(s2, "^0+", "0")
+quietly gen strL urgx = ustrregexrf(s2, "^0+", "0")
+quietly count if rgx != urgx
+local m4 = r(N)
+if `m4' di as err "C3p: regexr and ustrregexrf differ on `m4' strings"
+quietly gen double pn = real(ustrregexrf(ustrtrim(s2), "^0+", "0"))
+quietly gen double po = real(regexr(strtrim(s2), "^0+", "0"))
+_fx_call s2, destring "phase=compute" "threads=`th'" "raw=2" "old=0"
+_fx store `fx_token' double en double enfb
+_fx_call s2, destring "phase=compute" "threads=`th'" "raw=2" "old=1"
+_fx store `fx_token' double eo double eofb
+mata: st_local("m5", strofreal(_c3_bitdiff("pn", "en", "enfb")))
+mata: st_local("m6", strofreal(_c3_bitdiff("po", "eo", "eofb")))
+quietly count if enfb
+local fb3 = r(N)
+quietly count if eofb
+local fb4 = r(N)
+di as txt "C3p prep: trimmed bytes strtrim [`trs'] ustrtrim [`trus']; regexr vs ustrregexrf mismatches `m4'; prep+real() over `=_N' strings, mismatches caller>=14 `m5', caller<14 `m6'; not covered (fallback): `fb3', `fb4'"
+local mism = `mism' + `m3' + `m4' + `m5' + `m6'
 
 * ------------------------------------------------------------------------------------ C4
 clear

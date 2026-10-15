@@ -27,7 +27,7 @@ See `help fastata`.
 | `isid` | every form | `using`; string keys with leading or trailing blanks |
 | `duplicates` | `report`, `examples`, `list`, `tag`, `drop` | `browse` and error cases |
 | `xtile`, `pctile` | `nquantiles()`, weights, `altdef`, `if`, `in` | `cutpoints()`, `genp()`, `iweight`s, weighted percentiles within rounding distance of a cumulative weight |
-| `destring` | `generate()`/`replace`, `force`, `float`, `percent`, `dpcomma`, `ignore()` | `ignore(…, illegal)`, non-ASCII values, hexadecimal-looking strings, numbers beyond Stata's range |
+| `destring` | `generate()`/`replace`, `force`, `float`, `percent`, `dpcomma`, `ignore()`; callers under `version` 11 or newer | `ignore(…, illegal)`, non-ASCII values, hexadecimal-looking strings, numbers beyond Stata's range, callers under `version` 10 or older |
 | `tostring` | integers, with the default or a `%W.0g`/`%W.0f` format | other formats, non-integers |
 
 fastata checks every call and every original ado-file it depends on: if your Stata has other
