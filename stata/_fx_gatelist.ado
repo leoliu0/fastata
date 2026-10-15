@@ -3,6 +3,7 @@
 *! the file's text (lines without carriage returns, joined by newlines). The program does
 *! nothing; the file is an ado-file so that net install installs it.
 * Files where the list was last written:
+*   _crcslbl.ado: *! version 1.1.0  19dec1998
 *   _egen_marksample.ado: *! version 1.0.0  22oct2021
 *   _egennoby.ado: *! version 1.0.2  22oct2021
 *   _expression_to_variable.ado: *! version 1.0.0  02mar2020
@@ -109,6 +110,7 @@
 * gate isid isid.ado 3494 4097716689
 * gate pctile _parsewt.ado 4440 4262609996
 * gate pctile pctile.ado 2567 208461117
+* gate tostring _crcslbl.ado 205 1069343574
 * gate tostring tostring.ado 4211 2592194517
 * gate xtile _parsewt.ado 4440 4262609996
 * gate xtile pctile.ado 2567 208461117

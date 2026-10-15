@@ -215,7 +215,9 @@ assert strpos(`"`rt2'"', "a b/fastata/") > 0
 fx_where egen `"`rt2'egen.ado"'
 fx_both "egen t = tag(g s)" , expect(egen fallback) allr
 fx_both "xtile q = x1, nq(10)" , expect(xtile fallback) allr
-fx_both "tostring zi, gen(zs)" , expect(tostring fallback) allr
+* leftover r() of the non-rclass tostring and isid is a documented exception: no allr
+fx_both "tostring zi, gen(zs)" , expect(tostring fast)
+fx_both "isid id" , expect(isid fast)
 fastata off
 _fx rmruntime `"`rt2'"'
 sysdir set PLUS `"`plus0'"'

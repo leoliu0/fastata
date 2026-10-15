@@ -18,7 +18,7 @@ local files_duplicates duplicates.ado
 local files_xtile      xtile.ado pctile.ado _parsewt.ado
 local files_pctile     pctile.ado _parsewt.ado
 local files_destring   destring.ado _parse_ignore.ado
-local files_tostring   tostring.ado
+local files_tostring   tostring.ado _crcslbl.ado
 * egen:<fn> keys: egen.ado, _g<fn>.ado and the helpers of _g<fn>.ado
 local h_group  _egennoby.ado
 local h_tag    _egennoby.ado
