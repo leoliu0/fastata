@@ -282,6 +282,8 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
         if "fastata: enabled; Stata loads it at startup through" not in slog or "on now:      yes" not in slog:
             return state.record(pkg, stage_name, False, reason=f"fastata setup failed (see results/arm_{arm}_setup.log)")
         env["FASTATA_COUNTS"] = str(root / CALLS)
+        if arm == "V":
+            env["FASTATA_MODE"] = "verify"  # for a fastata that reads it (survives clear all)
     master = root / meta["master"]
     cwd = root / meta["cwd"] if meta.get("cwd") is not None else master.parent
     (root / WRAPPER).write_text(wrapper_text(pkg, arm, master, cwd))
