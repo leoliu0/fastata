@@ -63,20 +63,27 @@ mata:
 // variable label. Sets fx_verdict DIFF and fx_detail on the first difference.
 string matrix _fxrepl_head(string scalar fr)
 {
-	string scalar cur
+	string scalar cur, v
 	string matrix out
-	real scalar i
+	real scalar i, k, n
 
 	cur = st_framecurrent()
 	st_framecurrent(fr)
 	stata("local _fxs : sortedby")
 	stata("local _fxd : data label")
-	out = ("", "N", strofreal(st_nobs(), "%20.0f")) \ ("", "sort order", st_local("_fxs")) \
-		("", "data label", st_local("_fxd")) \ ("", "variables", invtokens(st_nvar() ? st_varname(1..st_nvar()) : J(1, 0, "")))
-	for (i = 1; i <= st_nvar(); i++) {
-		out = out \ (st_varname(i), "type", st_vartype(i)) \ (st_varname(i), "format", st_varformat(i)) \
-			(st_varname(i), "value label name", st_varvaluelabel(i)) \
-			(st_varname(i), "variable label", st_varlabel(i))
+	n = st_nvar()
+	out = J(4 + 4 * n, 3, "")
+	out[1, .] = ("", "N", strofreal(st_nobs(), "%20.0f"))
+	out[2, .] = ("", "sort order", st_local("_fxs"))
+	out[3, .] = ("", "data label", st_local("_fxd"))
+	out[4, .] = ("", "variables", (n ? invtokens(st_varname(1..n)) : ""))
+	k = 4
+	for (i = 1; i <= n; i++) {
+		v = st_varname(i)
+		out[++k, .] = (v, "type", st_vartype(i))
+		out[++k, .] = (v, "format", st_varformat(i))
+		out[++k, .] = (v, "value label name", st_varvaluelabel(i))
+		out[++k, .] = (v, "variable label", st_varlabel(i))
 	}
 	st_framecurrent(cur)
 	return(out)
@@ -102,31 +109,39 @@ void _fxrepl_cmphead(string scalar fa, string scalar fb)
 	}
 }
 
+// Characteristics (notes included) of _dta and every variable, and value-label definitions, as
+// text lines (built in one allocation: wide files have tens of thousands of variables).
 string colvector _fxrepl_meta(string scalar fr)
 {
 	string scalar cur
-	string colvector out, vars, names, labs, txt
+	string colvector out, vars, labs, txt
+	pointer(string colvector) colvector nm
 	real colvector vals
-	real scalar i, j
+	real scalar i, j, k, tot
 
 	cur = st_framecurrent()
 	st_framecurrent(fr)
-	out = J(0, 1, "")
 	vars = "_dta"
 	if (st_nvar()) vars = vars \ st_varname(1..st_nvar())'
+	nm = J(rows(vars), 1, NULL)
+	tot = 0
 	for (i = 1; i <= rows(vars); i++) {
-		names = sort(st_dir("char", vars[i], "*"), 1)
-		for (j = 1; j <= rows(names); j++) {
-			out = out \ ("char " + vars[i] + "[" + names[j] + "] = " + st_global(vars[i] + "[" + names[j] + "]"))
-		}
+		nm[i] = &sort(st_dir("char", vars[i], "*"), 1)
+		tot = tot + rows(*nm[i])
 	}
 	stata("quietly label dir")
 	labs = sort(tokens(st_global("r(names)"))', 1)
+	out = J(tot, 1, "")
+	k = 0
+	for (i = 1; i <= rows(vars); i++) {
+		for (j = 1; j <= rows(*nm[i]); j++) {
+			out[++k] = "char " + vars[i] + "[" + (*nm[i])[j] + "] = " +
+				st_global(vars[i] + "[" + (*nm[i])[j] + "]")
+		}
+	}
 	for (i = 1; i <= rows(labs); i++) {
 		st_vlload(labs[i], vals, txt)
-		for (j = 1; j <= rows(vals); j++) {
-			out = out \ ("label " + labs[i] + " " + strofreal(vals[j], "%21x") + " = " + txt[j])
-		}
+		out = out \ ("label " + labs[i] + " ") :+ strofreal(vals, "%21x") :+ " = " :+ txt
 	}
 	st_framecurrent(cur)
 	return(out)

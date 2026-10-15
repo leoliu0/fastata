@@ -1,13 +1,13 @@
 # fastata replication results
 
-Generated 2026-10-16 01:27 by `repl report`. Arms: A original commands, B original with `set sortseed 20261015`, F fastata (installed and enabled in the sandbox).
+Generated 2026-10-16 02:25 by `repl report`. Arms: A original commands, B original with `set sortseed 20261015`, F fastata (installed and enabled in the sandbox).
 A package counts when it was compared and arm F made at least one replaced-command call (fast or fallback).
 
 ## Totals
 
-- counted packages: **9** (PASS 8, files with DIFF: 2)
+- counted packages: **9** (PASS 9, files with DIFF: 0)
 - compared packages: 10; packages tried: 147
-- file verdicts (all compared packages): SAME 216, NEAR 0, TIE 5, DIFF 2, SKIP 157, ERR 13
+- file verdicts (all compared packages): SAME 221, NEAR 0, TIE 15, DIFF 0, SKIP 157, ERR 0
 
 ## Replaced commands (counted packages)
 
@@ -30,7 +30,7 @@ A package counts when it was compared and arm F made at least one replaced-comma
 |dataverse-F1MTEN|REStat|2026|[10.7910/DVN/F1MTEN](https://doi.org/10.7910/DVN/F1MTEN)|Replication data for: Firm Responses to Hiring and Investment Subsidies: Regression Discon|4|4|1.06|egen 0/4|6|0|0|0|3|PASS|
 |dataverse-ICNB18|JPE Micro|2026|[10.7910/DVN/ICNB18](https://doi.org/10.7910/DVN/ICNB18)|Replication Data for: Attention as a First-Order Barrier to Adoption of Evidence-based Pro|8|3|0.41|egen 0/3|23|0|0|0|0|PASS|
 |dataverse-JD0W1S|RFS|2026|[10.7910/DVN/JD0W1S](https://doi.org/10.7910/DVN/JD0W1S)|Replication Package for: Financial Advice and Investor Beliefs: Experimental Evidence on A|5|5|1.02|egen 0/96, isid 0/1|28|0|0|0|10|PASS|
-|dataverse-KIDK6R|RFS|2026|[10.7910/DVN/KIDK6R](https://doi.org/10.7910/DVN/KIDK6R)|Replication Package for: The Coherence Side of Rationality: Theory and Evidence from Firm |311|305|0.98|duplicates 0/2, egen 0/627, isid 0/10|37|0|0|2|4|FAIL|
+|dataverse-KIDK6R|RFS|2026|[10.7910/DVN/KIDK6R](https://doi.org/10.7910/DVN/KIDK6R)|Replication Package for: The Coherence Side of Rationality: Theory and Evidence from Firm |209|296|1.41|duplicates 0/2, egen 0/627, isid 0/10|42|0|10|0|4|PASS|
 |dataverse-NYXW03|JPE|2026|[10.7910/DVN/NYXW03](https://doi.org/10.7910/DVN/NYXW03)|Replication Data for: Not Learning from Others|17|15|0.93|egen 0/10|22|0|0|0|30|PASS|
 |dataverse-SHXCAH|REStat|2026|[10.7910/DVN/SHXCAH](https://doi.org/10.7910/DVN/SHXCAH)|Replication data for: How Credible are the Findings from Online Experiments?|113|103|0.91|destring 0/89, duplicates 0/33, egen 0/79, pctile 0/7, tostring 0/3|52|0|1|0|72|PASS|
 |dataverse-YXWBGX|JPE Macro|2026|[10.7910/DVN/YXWBGX](https://doi.org/10.7910/DVN/YXWBGX)|Replication Data for: Size Matters: Matching Externalities and the Advantages of Large Lab|0|0|||3|0|0|0|0|PASS (not counted)|
@@ -40,21 +40,16 @@ A package counts when it was compared and arm F made at least one replaced-comma
 
 |package|file|verdict|A vs F|A vs B|
 |---|---|---|---|---|
-|dataverse-KIDK6R|`<wrapper log>`|DIFF|DIFF line 45: '[2]  (BASE)      "/home/leo/.local/bin/ado/base/"' vs '[2]              "<RUN>/_fxrepl_home/ado/plus/fastata/"'|SAME |
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented2.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented3.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_adv.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_cpx.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_panel.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_panel_adv.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_panel_allCFOs.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_singleCFOs.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_singleCFOs2.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_singleCFOs_cpx.dta`|ERR|ERR use failed: r(900) r(900)|ERR use failed: r(900) r(900)|
-|dataverse-KIDK6R|`InCoherence_replication_portable_code/results/log/main.log`|DIFF|DIFF line 34: '[2]  (BASE)      "/home/leo/.local/bin/ado/base/"' vs '[2]              "<RUN>/_fxrepl_home/ado/plus/fastata/"'|SAME |
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented2.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmented3.dta`|TIE|DIFF imputed_respondent_id: values differ in 2129 obs (max reldif .0035)|DIFF imputed_respondent_id: values differ in 3487 obs (max reldif .0035)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_adv.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_cpx.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_panel.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_panel_adv.dta`|TIE|DIFF imputed_respondent_id: values differ in 252 obs (max reldif .0031)|DIFF imputed_respondent_id: values differ in 2617 obs (max reldif .099)|
+|dataverse-KIDK6R|`InCoherence_replication_portable_code/data/analysis/compustat_dukecfo_9919_mergedwide_aug_augmentedregvars_singleCFOs2.dta`|TIE|DIFF imputed_respondent_id: values differ in 591 obs (max reldif .0034)|DIFF imputed_respondent_id: values differ in 827 obs (max reldif .0033)|
 |dataverse-SHXCAH|`<wrapper log>`|TIE|DIFF numbers differ (max reldif 0.003)|DIFF numbers differ (max reldif 0.0015)|
 |dataverse-ZIXTGH|`<wrapper log>`|TIE|DIFF line 10181: 'F(35, 9)          =       .' vs 'F(34, 9)          =       .'|DIFF line 10301: 'F(35, 9)          =       .' vs 'F(36, 9)          =       .'|
 |dataverse-ZIXTGH|`EDC Replication Package/Data/Datasets/applicant_endline.dta`|TIE|DIFF month: missing patterns differ in 311 obs|DIFF month: missing patterns differ in 288 obs|
