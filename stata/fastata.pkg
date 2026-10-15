@@ -12,6 +12,7 @@ d License: MIT
 d Distribution-Date: 20261015
 f fastata.ado
 f fastata_init.ado
+f fastata.sthlp
 f _fx.ado
 f _fx_call.ado
 f _fx_gatelist.ado
