@@ -7,7 +7,7 @@ version 16
 clear all
 set more off
 local here `c(pwd)'
-foreach t in test_framework test_fallback test_dup test_strnum calib_strnum test_quant calib_pctile {
+foreach t in test_framework test_fallback test_egen calib_egen test_dup test_strnum calib_strnum test_quant calib_pctile {
 	di as text _n "{hline 78}" _n "running `t'.do" _n "{hline 78}"
 	quietly cd "`here'"
 	do `t'.do
