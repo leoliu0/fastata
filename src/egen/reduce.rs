@@ -80,13 +80,14 @@ pub fn mean_sd(xs: &[f64], miss: f64, by: bool) -> (f64, f64) {
     (arith(m, miss), arith((ss / (n - 1) as f64).sqrt(), miss))
 }
 
-/// `std()` of value `x`: `sd_opt*(x − m)/s + mean_opt`, `.` when any part is missing.
+/// `std()` of value `x`: `sd_opt*(x − m)/s + mean_opt`, `.` when any part is missing. Stata's
+/// expression parser binds `/` tighter than `*`: `a*b/c` is `a*(b/c)`.
 #[inline]
 pub fn std_value(x: f64, m: f64, s: f64, sd_opt: f64, mean_opt: f64, miss: f64) -> f64 {
     if x >= miss || m >= miss || s >= miss {
         return miss;
     }
-    arith(sd_opt * (x - m) / s + mean_opt, miss)
+    arith(sd_opt * ((x - m) / s) + mean_opt, miss)
 }
 
 /// `max()`/`min()`: the extreme nonmissing value (`.` if none). With `missing`, missing values
@@ -132,11 +133,11 @@ fn round1(x: f64) -> f64 {
 }
 
 /// `_gpctile` by-group: `np = round(n*p/100, 1)`; `cond(100*np == n*p, (x[np] + x[np+1])/2,
-/// x[floor(n*p/100) + 1])`.
+/// x[floor(n*p/100) + 1])`, with `n*p/100` = `n*(p/100)` (see [`std_value`]).
 pub fn pctile_by(s: &[f64], p: f64, miss: f64) -> f64 {
     let n = s.len() as f64;
-    let np = round1(n * p / 100.0);
-    if 100.0 * np == n * p { half_sum(at(s, np, miss), at(s, np + 1.0, miss), miss) } else { at(s, (n * p / 100.0).floor() + 1.0, miss) }
+    let np = round1(n * (p / 100.0));
+    if 100.0 * np == n * p { half_sum(at(s, np, miss), at(s, np + 1.0, miss), miss) } else { at(s, (n * (p / 100.0)).floor() + 1.0, miss) }
 }
 
 /// `_pctile` of the sorted nonmissing values (`.` when there are none).

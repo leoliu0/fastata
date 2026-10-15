@@ -365,7 +365,7 @@ fn std_and_extremes_with_missing_option() {
         let (m, s) = reduce::mean_sd(&xs, MISS, true);
         for &o in members {
             let x = d.xv[o];
-            let want = if x >= MISS || s >= MISS { MISS } else { spec::arith(2.0 * (x - m) / s + 1.5, MISS) };
+            let want = if x >= MISS || s >= MISS { MISS } else { spec::arith(2.0 * ((x - m) / s) + 1.5, MISS) };
             assert_eq!(got[o].to_bits(), want.to_bits());
         }
     }

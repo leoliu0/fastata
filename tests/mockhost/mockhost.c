@@ -382,7 +382,8 @@ static void test_stale_token(void) {
     tok = macro_get("_fx_token");
     if (rc || !tok) { fail("stale token", "second cachetest failed"); return; }
     snprintf(token, sizeof token, "token=%s", tok);
-    const char *fargs[] = {"egen", NULL};
+    /* a compute phase that falls back: a mean of x1 does not fit type byte */
+    const char *fargs[] = {"egen", "phase=compute", "fcn=mean", "type=byte", "nvals=1", NULL};
     int rc3 = call(vars, fargs);
     int fb = macro_get("_fx_fallback") != NULL;
     int rc4 = call(outs, sargs);
