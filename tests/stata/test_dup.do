@@ -202,9 +202,16 @@ frame big {
 	quietly set obs 40000
 	gen byte c = 1
 	gen byte d = _n <= 33000
+	* largest tag 100 (byte), 101 (int), 32740 (int), 32741 (long)
+	foreach m in 101 102 32741 32742 {
+		gen byte e`m' = _n <= `m'
+	}
 }
 ff "duplicates tag c, gen(dt)" duplicates fast big
 ff "duplicates tag d, gen(dt)" duplicates fast big
+foreach m in 101 102 32741 32742 {
+	ff "duplicates tag e`m' if _n <= `m' + 3, gen(dt)" duplicates fast big
+}
 ff "duplicates report d" duplicates fast big
 
 * mixed storage types, long strL keys, in ranges from the end
