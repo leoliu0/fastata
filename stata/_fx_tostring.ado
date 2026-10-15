@@ -89,7 +89,9 @@ program _fx_tostring
 						move `temp' `v'
 						local vl: variable label `v'
 						drop `v'
-						rename `temp' `v'
+						* under tostring.ado's version, where rename does not switch an SMCL
+						* log to {res} as it does under version 12 and later
+						version 8: rename `temp' `v'
 						label variable `v' `"`vl'"'
 		di as txt "`v' was {res:`oldtype'} now {res:`: type `v''}"
 						char `v'[tostring] ///
@@ -98,6 +100,11 @@ program _fx_tostring
 				}
 			}
 			_fx count tostring fast
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify tostring `caller' `rc0' 0 "" "" "" 0 "" `"`0'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
 			exit
 		}
 	}

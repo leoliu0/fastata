@@ -11,10 +11,16 @@ program _fx_egen, byable(onecall)
 	if _by() local byv `_byvars'
 	local fx_done 0
 	local fx_reason
+	local fx_vpend 0
 	Fast `caller' `"`byv'"' `0'
 	if "`fx_done'" == "1" {
 		_fx count egen fast
 		capture error 0
+		* verify mode: the original on the snapshot taken by gate; its result is kept
+		if "`fx_vpend'" == "1" {
+			_fx verify egen `caller' `rc0' 0 0 `"`byv'"' `"`_byrc0'"' `fx_vtol' "" `"`0'"'
+			if `fx_vrc' exit `fx_vrc'
+		}
 		exit
 	}
 	_fx count egen fallback `"`fx_reason'"'
@@ -88,6 +94,7 @@ program Fast
 	}
 
 	_fx gate egen:`fcn'
+	c_local fx_vpend `fx_vpend'
 	if !`fx_ok' {
 		c_local fx_reason `"`fx_why'"'
 		exit
@@ -116,7 +123,7 @@ program Fast
 		local nxt = ustrregexs(4)
 		local isv 0
 		if "`nxt'" == "" & !`: list tok in reserved' {
-			mata: st_local("isv", strofreal(st_nvar() ? anyof(st_varname(1..st_nvar()), st_local("tok")) : 0))
+			quietly mata: st_local("isv", strofreal(st_nvar() ? anyof(st_varname(1..st_nvar()), st_local("tok")) : 0))
 		}
 		if !`isv' local usbad 1
 		local rest = usubstr(`"`rest'"', ustrpos(`"`rest'"', `"`s0'"') + ustrlen(`"`s0'"'), .)
@@ -396,7 +403,8 @@ program Fast
 
 	* ---- messages, labels and notes, as the original
 	if inlist("`fcn'", "median", "pctile", "iqr") & "`by'" == "" & "`fx_n'" == "0" {
-		di as err "no observations"
+		* the original's _pctile prints this as text, not as an error
+		di as txt "no observations"
 	}
 	if "`fcn'" != "tag" & `fx_nmiss' > 0 {
 		local s = cond(`fx_nmiss' > 1, "s", "")
@@ -432,5 +440,18 @@ program Fast
 		}
 		label var `name' `"Standardized values of `exp'"'
 	}
+	* verify mode: the accumulation-class tolerance (help fastata) for the comparison with the
+	* original, whose sums follow the random tie order of its sort by the by() variables
+	local vtol 0
+	if inlist("`fcn'", "total", "sum", "mean", "sd", "std") & "`by'" != "" {
+		local sb : sortedby
+		local head
+		local nb : word count `by'
+		forvalues i = 1/`nb' {
+			local head `head' `: word `i' of `sb''
+		}
+		if "`head'" != "`by'" local vtol = cond("`type'" == "double", 1e-13, 2^-23)
+	}
+	c_local fx_vtol `vtol'
 	c_local fx_done 1
 end

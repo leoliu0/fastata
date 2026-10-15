@@ -36,8 +36,9 @@ versions of the originals than those fastata was verified against, the originals
 ## Same results
 
 On the fast path, the data (values bitwise, missing codes, types, formats, labels, notes,
-characteristics, sort marker), the Results-window output, errors and documented stored results are
-those of the original, with three documented exceptions (`help fastata`): fastata does not sort, so
+characteristics, sort marker), the Results-window output (text and SMCL logs, style tags
+included), errors and documented stored results are those of the original, with three documented
+exceptions (`help fastata`): fastata does not sort, so
 a later command that depends on the order of ties in a sort may order them differently;
 undocumented leftovers in `r()` are not reproduced; and `egen` sums, means and standard deviations
 within groups of unsorted data agree to a relative 1e-13 (one unit in the last place for float),
@@ -77,5 +78,12 @@ Needs Rust 1.85+ and a C compiler. `scripts/build_plugin.sh` builds `stata/fasta
 Tests: `cargo test --release`; the mock host in `tests/mockhost`; and, in `tests/stata`,
 `stata-mp -b do run_all.do` (the full random test: `do test_random.do`). Benchmarks:
 `stata-mp -b do bench.do` in `bench`. Replication harness: `repl/` (`uv run repl --help`).
+
+Verify mode (environment variable `FASTATA_MODE=verify`, or `_fx mode verify` for a session) is for
+testing on real code: every call that takes a fast path also runs the original command, quietly,
+on a copy of the data made before the call, from the same random-number states; the two results
+are compared and the original's is kept, so a whole run gives the original's results (sort tie
+order included). With `FASTATA_COUNTS=<file>` set, each such call appends `<cmd>,verify_ok,`,
+`<cmd>,verify_mismatch,<first difference>` or `<cmd>,verify_skipped,<reason>` to that file.
 
 MIT license.

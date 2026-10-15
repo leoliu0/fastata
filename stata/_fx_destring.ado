@@ -168,6 +168,11 @@ program _fx_destring
 				char `var'[destring_cmd]
 				if "`genrep'"=="generate" {
 					Charcopy `var' `NEWVAR'
+					* destring.ado renames its new variable to the generate() name here.
+					* rename runs a non-quiet mata: line, which switches an SMCL log to
+					* {res}; the variable already has its name, so this reproduces only
+					* that (deliberately not quiet)
+					mata: (void) st_nvar()
 				}
 				else {
 					char rename `var' `NEWVAR'
@@ -176,6 +181,11 @@ program _fx_destring
 				}
 			}
 			_fx count destring fast
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify destring `caller' `rc0' 0 "" "" "" 0 "" `"`0'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
 			exit
 		}
 	}
@@ -277,7 +287,7 @@ program Parse
 	local jj 1
 	while `"`char`jj''"' != "" {
 		local t `"`char`jj''"'
-		mata: st_local("code", strlen(st_local("t")) == 1 ? strofreal(ascii(st_local("t"))) : "")
+		quietly mata: st_local("code", strlen(st_local("t")) == 1 ? strofreal(ascii(st_local("t"))) : "")
 		if "`code'" == "" local badign 1
 		else if `code' < 32 | `code' > 126 | inlist(`code', 34, 39, 92, 96) local badign 1
 		local codes `codes' `code'

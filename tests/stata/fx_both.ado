@@ -1,9 +1,10 @@
-*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback|any) nosortcheck]
+*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback|any) nosortcheck nosmcl]
 *! Runs <command> twice from the same state: in frame fa with fastata off (the original command
 *! runs) and in frame fb with fastata on, both on copies of frame base (default: base), both from
 *! the same sort seed and with r() cleared. Fails (r(9)) unless the two runs give
 *! - the same return code;
-*! - the same output, as captured by log using ..., text;
+*! - the same output, as captured by log using ..., text, and the same SMCL log (log using ...,
+*!   smcl: every style tag too, line by line; nosmcl skips it);
 *! - the same r() results named in r() (all r() results with allr);
 *! - the same data (fx_cmpframes; tolerance tol, default 0: bitwise).
 *! expect(cmd kind) also checks that the second run went through fastata's cmd as kind (fast or
@@ -14,7 +15,7 @@
 program fx_both
 	version 16
 	gettoken cmd 0 : 0
-	syntax [, Base(name) TOL(real 0) R(string) ALLR EXPect(string) noSORTcheck]
+	syntax [, Base(name) TOL(real 0) R(string) ALLR EXPect(string) noSORTcheck noSMCL]
 	if "`base'" == "" local base base
 	gettoken ecmd ekind : expect
 	local ekind `ekind'
@@ -28,15 +29,15 @@ program fx_both
 	capture frame drop fb
 	frame copy `base' fa
 	frame copy `base' fb
-	tempfile la lb
+	tempfile la lb sa sb
 
 	quietly fastata off
 	mata: _fxb_count0 = _fxb_counts("`ecmd'")
-	frame fa: _fxb_run `"`cmd'"' `"`la'"' a
+	frame fa: _fxb_run `"`cmd'"' `"`la'"' `"`sa'"' a
 	local rca `fxb_rc'
 	mata: _fxb_count1 = _fxb_counts("`ecmd'")
 	quietly fastata on
-	frame fb: _fxb_run `"`cmd'"' `"`lb'"' b
+	frame fb: _fxb_run `"`cmd'"' `"`lb'"' `"`sb'"' b
 	local rcb `fxb_rc'
 	mata: _fxb_count2 = _fxb_counts("`ecmd'")
 
@@ -70,22 +71,26 @@ program fx_both
 		di as err `"`cmd': return code `rca' with fastata off, `rcb' with fastata on"'
 		exit 9
 	}
-	mata: _fxb_cmplogs(st_local("la"), st_local("lb"), st_local("cmd"))
+	mata: _fxb_cmplogs(st_local("la"), st_local("lb"), st_local("cmd"), "output")
+	if "`smcl'" == "" mata: _fxb_cmplogs(st_local("sa"), st_local("sb"), st_local("cmd"), "SMCL log")
 	mata: _fxb_cmpr(st_local("r"), "`allr'" != "", st_local("cmd"))
 	fx_cmpframes fa fb, tol(`tol') what(`"`cmd'"') `sortcheck'
 end
 
 * Runs cmd in the current frame from sort seed 20261015 with r() cleared, logging its output
-* to file log; saves r() under tag and returns the return code in fxb_rc.
+* to file log (text) and file slog (SMCL); saves r() under tag and returns the return code in
+* fxb_rc.
 program _fxb_run
-	args cmd log tag
+	args cmd log slog tag
 	set sortseed 20261015
 	quietly log using `"`log'"', text name(_fxb) nomsg replace
+	quietly log using `"`slog'"', smcl name(_fxbs) nomsg replace
 	_fxb_rclear
 	capture noisily `cmd'
 	local rc = _rc
 	mata: _fxb_rsave("`tag'")
 	quietly log close _fxb
+	quietly log close _fxbs
 	c_local fxb_rc `rc'
 end
 
@@ -163,7 +168,7 @@ void _fxb_cmpr(string scalar names, real scalar all, string scalar what)
 	}
 }
 
-void _fxb_cmplogs(string scalar fa, string scalar fb, string scalar what)
+void _fxb_cmplogs(string scalar fa, string scalar fb, string scalar what, string scalar kind)
 {
 	string colvector a, b
 	real scalar i
@@ -174,9 +179,15 @@ void _fxb_cmplogs(string scalar fa, string scalar fb, string scalar what)
 	for (i = 1; i <= min((rows(a), rows(b))); i++) {
 		if (a[i] != b[i]) break
 	}
-	errprintf("%s: output differs at line %g:\n", what, i)
-	errprintf("  off: %s\n", i <= rows(a) ? a[i] : "(end)")
-	errprintf("  on:  %s\n", i <= rows(b) ? b[i] : "(end)")
+	errprintf("%s: %s differs at line %g:\n", what, kind, i)
+	errprintf("  off: %s\n", _fxb_esc(i <= rows(a) ? a[i] : "(end)"))
+	errprintf("  on:  %s\n", _fxb_esc(i <= rows(b) ? b[i] : "(end)"))
 	exit(9)
+}
+
+// s with SMCL braces escaped, so that tags show in the message
+string scalar _fxb_esc(string scalar s)
+{
+	return(subinstr(subinstr(subinstr(s, "{", char(1), .), "}", "{c )-}", .), char(1), "{c -(}"))
 }
 end

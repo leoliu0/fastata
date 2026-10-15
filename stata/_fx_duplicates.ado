@@ -108,6 +108,16 @@ program _fx_duplicates, rclass
 				if `fx_ndup' == 0 di _n as txt "(0 observations are duplicates)"
 				else List `sub' `fx_token' `fx_ndup' `fx_nlist' `c(obs_t)' `c(type)' `"`varlist'"' `"`options'"'
 			}
+			* verify mode: the original on the snapshot taken by gate (without the sample
+			* marker, which the original never sees); its data are kept
+			if "`fx_vpend'" == "1" {
+				if "`tv'" != "" drop `tv'
+				local rspec N `fx_n'
+				if "`sub'" == "report" local rspec `rspec' unique_value `fx_nuniq'
+				if "`sub'" == "drop" local rspec `rspec' N_drop `fx_ndrop'
+				_fx verify duplicates `caller' `rc0' 0 "" "" "" 0 "`rspec'" `"`cmdline'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
 			exit
 		}
 		* the original must see the data as the user left them
@@ -145,7 +155,7 @@ program Report
 		foreach v in Ngroup freq surplus {
 			quietly gen `obst' `v' = .
 		}
-		mata: st_store(., ("Ngroup", "freq", "surplus"), colshape(strtoreal(tokens(st_local("table"))), 3))
+		quietly mata: st_store(., ("Ngroup", "freq", "surplus"), colshape(strtoreal(tokens(st_local("table"))), 3))
 		label var Ngroup "Copies"
 		label var freq "Observations"
 		label var surplus "Surplus"

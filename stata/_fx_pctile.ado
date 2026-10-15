@@ -16,6 +16,11 @@ program _fx_pctile
 			_fx count pctile fast
 			* pctile.ado leaves c(rc) from its capture confirm variable <exp>
 			capture confirm variable `fx_exp'
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify pctile `caller' `rc0' 0 `=c(rc)' "" "" 0 "" `"`0'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
 			exit
 		}
 	}

@@ -15,6 +15,11 @@ program _fx_xtile
 			_fx count xtile fast
 			* xtile.ado leaves c(rc) at 0 (from pctile's capture confirm variable)
 			capture error 0
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify xtile `caller' `rc0' 0 0 "" "" 0 "" `"`0'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
 			exit
 		}
 	}
