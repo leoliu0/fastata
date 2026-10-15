@@ -1,4 +1,4 @@
-*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback) nosortcheck]
+*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback|any) nosortcheck]
 *! Runs <command> twice from the same state: in frame fa with fastata off (the original command
 *! runs) and in frame fb with fastata on, both on copies of frame base (default: base), both from
 *! the same sort seed and with r() cleared. Fails (r(9)) unless the two runs give
@@ -7,7 +7,10 @@
 *! - the same r() results named in r() (all r() results with allr);
 *! - the same data (fx_cmpframes; tolerance tol, default 0: bitwise).
 *! expect(cmd kind) also checks that the second run went through fastata's cmd as kind (fast or
-*! fallback) and that the first did not. fastata is on afterwards.
+*! fallback; any: either, or neither when cmd is not reached in either run, e.g. a by prefix on
+*! unsorted data fails first) and that the first did not; the path taken comes back in local
+*! fxb_path (fast, fallback, fast+fallback for several calls, or none) and the last fallback
+*! reason of cmd in local fxb_why, set before the comparisons. fastata is on afterwards.
 program fx_both
 	version 16
 	gettoken cmd 0 : 0
@@ -15,10 +18,12 @@ program fx_both
 	if "`base'" == "" local base base
 	gettoken ecmd ekind : expect
 	local ekind `ekind'
-	if "`ecmd'" != "" & !inlist("`ekind'", "fast", "fallback") {
-		di as err "fx_both: expect(<cmd> fast|fallback)"
+	if "`ecmd'" != "" & !inlist("`ekind'", "fast", "fallback", "any") {
+		di as err "fx_both: expect(<cmd> fast|fallback|any)"
 		exit 198
 	}
+	c_local fxb_path
+	c_local fxb_why
 	capture frame drop fa
 	capture frame drop fb
 	frame copy `base' fa
@@ -37,8 +42,23 @@ program fx_both
 
 	if "`ecmd'" != "" {
 		mata: st_local("used0", strofreal(any(_fxb_count1 :!= _fxb_count0)))
-		local k = cond("`ekind'" == "fast", 1, 2)
-		mata: st_local("used", strofreal(_fxb_count2[`k'] - _fxb_count1[`k']))
+		mata: st_local("nfast", strofreal(_fxb_count2[1] - _fxb_count1[1]))
+		mata: st_local("nfb", strofreal(_fxb_count2[2] - _fxb_count1[2]))
+		local path = cond(`nfast' & `nfb', "fast+fallback", cond(`nfast', "fast", cond(`nfb', "fallback", "")))
+		c_local fxb_path `path'
+		if `nfb' {
+			mata: st_local("why", asarray_contains(*findexternal("_fx_why"), "`ecmd'") ? asarray(*findexternal("_fx_why"), "`ecmd'") : "")
+			c_local fxb_why `"`why'"'
+		}
+		if "`ekind'" == "any" {
+			local used = `nfast' + `nfb'
+			* cmd not reached in either run (a by prefix on unsorted data fails first): path none
+			if `used' == 0 {
+				local used 1
+				c_local fxb_path none
+			}
+		}
+		else local used = cond("`ekind'" == "fast", `nfast', `nfb')
 		if `used0' | `used' < 1 {
 			di as err `"`cmd': expected `ecmd' to run through fastata as `ekind' only in the second run"'
 			di as err "  counts (fast, fallback) before: " _c

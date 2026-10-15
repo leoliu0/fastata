@@ -307,5 +307,25 @@ mata: l = cat(st_local("tmp") + "counts.csv"); st_local("ok", strofreal(rows(l) 
 assert `ok'
 di as txt "counts_save ok"
 
+* a cold gate check (and status) leaves the random numbers that break Stata's sort ties alone,
+* so that a fallback breaks the original's ties as the original alone would (test_random cases
+* 346, 1184 and 1594: egen rank(), unique and min(), missing after fastata on)
+clear
+quietly set obs 1000
+gen byte x = mod(_n, 3)
+gen long id = _n
+foreach k in "" "gate egen:rank" "gate isid" "gate duplicates" "gate xtile" "gate pctile" "gate destring" "gate tostring" "orig egen" "status" {
+	preserve
+	_fx reset
+	set sortseed 5
+	if "`k'" != "" _fx `k'
+	sort x
+	mata: st_local("h", strofreal(hash1(invtokens(strofreal(st_data(., "id"), "%9.0f")')), "%12.0f"))
+	restore
+	if "`k'" == "" local h0 `h'
+	else assert "`h'" == "`h0'"
+}
+di as txt "sort ties ok"
+
 fastata off
 di as result "TEST_FRAMEWORK passed"
