@@ -101,6 +101,9 @@ def wrapper_text(pkg: str, arm: str, master: Path, cwd: Path | None = None) -> s
         f"set processors {PROCESSORS}",
         f"sysdir set PLUS {sq(str(plus) + '/')}",
         f"sysdir set PERSONAL {sq(str(personal) + '/')}",
+        # also as a path entry: packages that point PLUS at their own ado folder still see their
+        # dependencies (after their own files)
+        f"quietly adopath + {sq(str(plus) + '/')}",
         "mata: mata mlib index",
     ]
     if arm == "B":
