@@ -14,7 +14,7 @@
 //! | `fcn` | `group tag total sum mean max min count median pctile iqr sd std rank rowtotal rowmean rowmax rowmin rowsd rowmiss rownonmiss` |
 //! | `type` | result storage type: `byte int long float double` (`tag`: `byte`) |
 //! | `nkeys` | number of keys (0: no by-groups) |
-//! | `sorted` | `1`: the data are sorted by the keys (by prefix), groups are runs; `0`: hash grouping |
+//! | `sorted` | `1`: the data are sorted by the keys (by prefix), groups are runs of numeric keys (string keys are hashed either way); `0`: hash grouping |
 //! | `nvals` | number of value variables |
 //! | `touse` | `0` or `1` |
 //! | `missing` | `0` or `1`: the function's `missing` option |

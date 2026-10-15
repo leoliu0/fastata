@@ -41,7 +41,7 @@ frame copy default bsz
 frame bsz: sort gsz
 
 global TE_N 0
-global TE_FAIL
+global TE_NFAIL 0
 capture program drop te
 * te "<command>" fast|fallback [frame] [tol]
 program te
@@ -50,8 +50,8 @@ program te
 	if "`tol'" == "" local tol 0
 	capture noisily fx_both `"`cmd'"', base(`frame') expect(egen `kind') tol(`tol')
 	if _rc {
-		global TE_FAIL `"$TE_FAIL "`cmd' [`frame']""'
-		di as err "TEST_EGEN FAIL: `cmd' [`frame']"
+		global TE_NFAIL = $TE_NFAIL + 1
+		di as err `"TEST_EGEN FAIL: `cmd' [`frame']"'
 	}
 	global TE_N = $TE_N + 1
 end
@@ -133,6 +133,17 @@ te "egen v = count(se), by(g)" fast
 te "egen v = count(sl) if u < .5" fast
 te "egen v = count(x1 > 0), by(se)" fast
 te "egen v = count(se + s)" fast
+
+* conditions with string literals
+te `"egen v = mean(x1) if s == "s1", by(g)"' fast base 1.2e-7
+te `"egen v = count(x1) if strpos(s, "1")"' fast
+te `"egen v = rank(x1) if s != "s2", by(s)"' fast
+te `"egen v = group(s) if s > "s1""' fast
+te `"egen v = rowtotal(x1 x2) if se == """' fast
+te "egen v = total(x1) if x2, by(g)" fast base 1.2e-7
+te "egen v = median(x1) if xz, by(g)" fast
+te "egen v = rowmean(x1 x2) if x2" fast
+te "egen v = tag(g) if xz" fast
 
 * integer result types: fit or fall back
 foreach ty in byte int long {
@@ -264,11 +275,8 @@ te "egen v = rowtotal(x*)" fast
 te "egen v = rowtotal(*1)" fallback
 te `"egen v = rank(cond(s == "s1", x1, x2))"' fallback
 
-if `"$TE_FAIL"' != "" {
-	di as err "TEST_EGEN failed specs:"
-	foreach c of global TE_FAIL {
-		di as err `"  `c'"'
-	}
+if $TE_NFAIL {
+	di as err "TEST_EGEN failed: $TE_NFAIL of $TE_N specs (lines TEST_EGEN FAIL above)"
 	exit 9
 }
 di as result "TEST_EGEN passed $TE_N specs"

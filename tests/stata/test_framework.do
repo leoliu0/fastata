@@ -189,14 +189,14 @@ capture frame drop fb
 frame copy base fa
 frame copy base fb
 set sortseed 1
-frame fa: egen m = mean(x1), by(g)
+frame fa: egen m = mode(g)
 frame fa: capture noisily isid id2
 assert _rc == 459
 _fx status
 assert `fx_nfb_egen' == `e0' + 1 & `fx_nfb_isid' == `i0' + 1
 _fx orig egen
 set sortseed 1
-frame fb: `fx_prog' m = mean(x1), by(g)
+frame fb: `fx_prog' m = mode(g)
 fx_cmpframes fa fb, tol(0) what(egen after PLUS changed)
 sysdir set PLUS `"`plus0'"'
 di as txt "PLUS changed ok"
@@ -212,7 +212,7 @@ _fx rtpath
 local rt2 `"`fx_rt'"'
 assert strpos(`"`rt2'"', "a b/fastata/") > 0
 fx_where egen `"`rt2'egen.ado"'
-fx_both "egen t = tag(g s)" , expect(egen fallback) allr
+fx_both "egen t = concat(g s)" , expect(egen fallback) allr
 fx_both "xtile q = x1, nq(10)" , expect(xtile fallback) allr
 fx_both "tostring zi, gen(zs)" , expect(tostring fallback) allr
 fastata off
@@ -289,7 +289,7 @@ foreach how in "clear all" discard {
 	local e0 `fx_nfb_egen'
 	local i0 `fx_nfb_isid'
 	sysuse auto, clear
-	egen m = mean(price), by(foreign)
+	egen m = mode(foreign)
 	isid make
 	_fx status
 	assert `fx_nfb_egen' == `e0' + 1 & `fx_nfb_isid' == `i0' + 1
@@ -299,7 +299,7 @@ di as txt "clear all and discard ok"
 * counts_save writes every command's counts
 _fx counts_save `"`tmp'counts.csv"'
 _fx status
-mata: l = cat(st_local("tmp") + "counts.csv"); st_local("ok", strofreal(rows(l) == 8 & l[1] == "cmd,fast,fallback,last_reason" & l[2] == "egen,0," + st_local("fx_nfb_egen") + "," + char(34) + "not implemented" + char(34)))
+mata: l = cat(st_local("tmp") + "counts.csv"); st_local("ok", strofreal(rows(l) == 8 & l[1] == "cmd,fast,fallback,last_reason" & l[2] == "egen,0," + st_local("fx_nfb_egen") + "," + char(34) + "function" + char(34)))
 assert `ok'
 di as txt "counts_save ok"
 
