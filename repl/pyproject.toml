@@ -1,0 +1,24 @@
+[project]
+name = "fastata-repl"
+version = "0.1.0"
+description = "fastata replication harness: runs published replication packages with fastata off and on and compares their outputs"
+authors = [{ name = "Leo Liu", email = "auleo.liu@gmail.com" }]
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = ["requests", "pyyaml", "openpyxl", "xlrd"]
+
+[project.scripts]
+repl = "repl.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/repl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
