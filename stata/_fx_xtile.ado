@@ -4,7 +4,7 @@
 *! plugin's quant command computes the percentiles and categories; see src/xtile.rs). Every
 *! other form, and every error condition of xtile.ado, runs the original.
 program _fx_xtile
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	_fx gate xtile

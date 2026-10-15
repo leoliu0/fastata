@@ -82,6 +82,17 @@ end
 * fxb_rc.
 program _fxb_run
 	args cmd log slog tag
+	* Stata keeps sort state beyond c(sortrngstate): after an original that sorts internally
+	* (e.g. xtile), the next by-sort into a sortpreserve original orders ties differently, even
+	* in another frame (documented exception 1: fastata does not sort). Any sort resets it, so
+	* both runs start from a sort of a scratch frame, then from the same seed.
+	frame create _fxb_reset
+	frame _fxb_reset {
+		quietly set obs 3
+		quietly gen byte x = 1
+		sort x
+	}
+	frame drop _fxb_reset
 	set sortseed 20261015
 	quietly log using `"`log'"', text name(_fxb) nomsg replace
 	quietly log using `"`slog'"', smcl name(_fxbs) nomsg replace

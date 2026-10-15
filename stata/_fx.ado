@@ -1117,7 +1117,7 @@ string colvector _fx_shim_lines(string scalar cmd, string scalar ver)
 	else {
 		l = l \ ("program " + cmd)
 	}
-	l = l \ (t + "local caller = _caller()") \ (t + "version 16")
+	l = l \ (t + "local caller : display _caller()") \ (t + "version 16")
 	if (cmd == "egen") {
 		l = l \ (t + "local byp")
 		l = l \ (t + "if _by() local byp by " + _fx_q("_byvars") + " " + _fx_q("_byrc0") + ":")

@@ -6,7 +6,7 @@
 *! tabdisp on a frame holding the report table, list on a frame holding the listed observations,
 *! drop if on a marker. Everything else runs the original.
 program _fx_duplicates, rclass
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'

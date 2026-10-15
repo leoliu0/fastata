@@ -5,7 +5,7 @@
 *! form (genp(), an integer type, ...), and every error condition of pctile.ado, runs the
 *! original.
 program _fx_pctile
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	_fx gate pctile

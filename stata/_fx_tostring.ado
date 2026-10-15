@@ -4,7 +4,7 @@
 *! missing codes, exactly as string() writes them), then runs tostring.ado's (3.0.0) own commands
 *! and messages on the new variables. Everything else runs the original.
 program _fx_tostring
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	_fx gate tostring

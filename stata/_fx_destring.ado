@@ -6,7 +6,7 @@
 *! strtrim() and regexr(), "bytes" in the messages; calibration C3p). Everything else (callers
 *! before 11), and any value outside the calibrated classes, runs the original.
 program _fx_destring
-	local caller = _caller()
+	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
 	_fx gate destring
