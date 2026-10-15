@@ -182,8 +182,9 @@ foreach p in egen _fx_egen _fx isid _fx_isid {
 	capture program drop `p'
 }
 _fx status
-local e0 `fx_nfb_egen'
-local i0 `fx_nfb_isid'
+* calls through fastata, fast or fallback
+local e0 = `fx_nfast_egen' + `fx_nfb_egen'
+local i0 = `fx_nfast_isid' + `fx_nfb_isid'
 capture frame drop fa
 capture frame drop fb
 frame copy base fa
@@ -193,7 +194,7 @@ frame fa: egen m = mean(x1), by(g)
 frame fa: capture noisily isid id2
 assert _rc == 459
 _fx status
-assert `fx_nfb_egen' == `e0' + 1 & `fx_nfb_isid' == `i0' + 1
+assert `fx_nfast_egen' + `fx_nfb_egen' == `e0' + 1 & `fx_nfast_isid' + `fx_nfb_isid' == `i0' + 1
 _fx orig egen
 set sortseed 1
 frame fb: `fx_prog' m = mean(x1), by(g)
@@ -286,13 +287,13 @@ foreach how in "clear all" discard {
 	quietly findfile egen.ado
 	assert `"`r(fn)'"' == `"`rt'egen.ado"'
 	_fx status
-	local e0 `fx_nfb_egen'
-	local i0 `fx_nfb_isid'
+	local e0 = `fx_nfast_egen' + `fx_nfb_egen'
+	local i0 = `fx_nfast_isid' + `fx_nfb_isid'
 	sysuse auto, clear
 	egen m = mean(price), by(foreign)
 	isid make
 	_fx status
-	assert `fx_nfb_egen' == `e0' + 1 & `fx_nfb_isid' == `i0' + 1
+	assert `fx_nfast_egen' + `fx_nfb_egen' == `e0' + 1 & `fx_nfast_isid' + `fx_nfb_isid' == `i0' + 1
 }
 di as txt "clear all and discard ok"
 
