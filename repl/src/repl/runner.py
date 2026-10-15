@@ -77,7 +77,7 @@ def manifest(root: Path) -> dict[str, list[int]]:
         if rel_dir == ".":
             dirnames[:] = [d for d in dirnames if not d.startswith(HARNESS_PREFIX)]
         for f in filenames:
-            if rel_dir == "." and f.startswith(HARNESS_PREFIX):
+            if rel_dir == "." and f.lstrip(".").startswith(HARNESS_PREFIX):
                 continue
             p = Path(dirpath) / f
             try:
@@ -317,13 +317,13 @@ def changed_files(pkg: str, arm: str) -> set[str]:
     saved list once the arm directory has been pruned."""
     cp = changed_path(pkg, arm)
     if cp.exists():
-        return set(json.loads(cp.read_text()))
+        return {f for f in json.loads(cp.read_text()) if not f.lstrip(".").startswith(HARNESS_PREFIX)}
     man = json.loads((results_dir(pkg) / f"arm_{arm}_manifest.json").read_text())
     pre, patched = man["files"], set(man.get("patched", []))
     post = manifest(arm_dir(pkg, arm))
     out = {k for k, v in post.items() if pre.get(k) != v}
     out |= {k for k in pre if k not in post}  # deleted by the run
-    return out - patched
+    return {f for f in out - patched if not f.lstrip(".").startswith(HARNESS_PREFIX)}
 
 
 def prune_arm(pkg: str, arm: str) -> None:

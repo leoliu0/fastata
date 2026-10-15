@@ -164,6 +164,6 @@ def render(count_on: str = "fast") -> str:
 
 
 def report(count_on: str = "fast", out: Path | None = None) -> Path:
-    out = out or paths.RESULTS_MD
+    out = out or paths.results_md()
     out.write_text(render(count_on))
     return out

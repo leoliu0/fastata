@@ -12,6 +12,12 @@ REPL_DIR = REPO / "repl"
 FASTATA_STATA = REPO / "stata"
 PATCHES = REPL_DIR / "patches"
 RESULTS_MD = REPL_DIR / "RESULTS.md"
+
+
+def results_md() -> Path:
+    """repl/RESULTS.md for the default data root; <root>/RESULTS.md for any other root (tests,
+    trial roots), so trial runs never overwrite the committed report."""
+    return RESULTS_MD if "FASTATA_REPL_ROOT" not in os.environ else data_root() / "RESULTS.md"
 STATA_HELPERS = Path(__file__).resolve().parent / "stata"
 
 

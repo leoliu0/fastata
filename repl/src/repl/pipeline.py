@@ -194,5 +194,5 @@ def run(target: int, sources: list[str], count_on: str = "fast", workers: int = 
                     f"(counted {len(counted)}/{target})")
             report.report(count_on)
     report.report(count_on)
-    log(f"pipeline: {len(counted)} counted packages; report {paths.RESULTS_MD}")
+    log(f"pipeline: {len(counted)} counted packages; report {paths.results_md()}")
     return len(counted)
