@@ -474,6 +474,27 @@ real rowvector _fx_filehash(string scalar path)
 	return(v)
 }
 
+// The distinct elements of x in order of first appearance. Unlike uniqrows(), sort() and
+// order(), it does not draw from the random-number generator that breaks Stata's sort ties
+// (sortseed), so that checking the gate leaves later sort ties, and so the results of an
+// original that depends on them, as they would be without fastata.
+string colvector _fx_uniq(string colvector x)
+{
+	transmorphic scalar seen
+	string colvector out
+	real scalar i
+
+	seen = asarray_create()
+	out = J(0, 1, "")
+	for (i = 1; i <= rows(x); i++) {
+		if (!asarray_contains(seen, x[i])) {
+			asarray(seen, x[i], 1)
+			out = out \ x[i]
+		}
+	}
+	return(out)
+}
+
 // ("1", "") when every file of key resolves to a verified version, else ("0", reason).
 string rowvector _fx_verdict(string scalar key)
 {
@@ -486,7 +507,7 @@ string rowvector _fx_verdict(string scalar key)
 	g = _fx_gates()
 	gr = select(g, g[., 1] :== key)
 	if (rows(gr) == 0) return(("0", "no gate for " + key))
-	files = uniqrows(gr[., 2])
+	files = _fx_uniq(gr[., 2])
 	for (i = 1; i <= rows(files); i++) {
 		f = files[i]
 		p = _fx_findorig(f)
@@ -918,7 +939,7 @@ void _fx_status()
 	for (i = 1; i <= cols(cm); i++) {
 		st_local("fx_orig_" + cm[i], _fx_findorig(cm[i] + ".ado"))
 		if (cm[i] == "egen") {
-			keys = uniqrows(select(g[., 1], strpos(g[., 1], "egen:") :== 1))
+			keys = _fx_uniq(select(g[., 1], strpos(g[., 1], "egen:") :== 1))
 			nok = 0
 			first = ("1", "")
 			for (j = 1; j <= rows(keys); j++) {

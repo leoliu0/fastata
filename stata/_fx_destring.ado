@@ -260,22 +260,22 @@ program Parse
 	}
 
 	* the characters destring's removal loop visits, as codes: printable ASCII other than
-	* quotes and backslash
+	* quotes and backslash (no exit inside the loop: under version 16, exit inside a loop does
+	* not leave the program)
 	local codes
+	local badign 0
 	local jj 1
 	while `"`char`jj''"' != "" {
 		local t `"`char`jj''"'
 		mata: st_local("code", strlen(st_local("t")) == 1 ? strofreal(ascii(st_local("t"))) : "")
-		if "`code'" == "" {
-			c_local fx_why ignore
-			exit
-		}
-		if `code' < 32 | `code' > 126 | inlist(`code', 34, 39, 92, 96) {
-			c_local fx_why ignore
-			exit
-		}
+		if "`code'" == "" local badign 1
+		else if `code' < 32 | `code' > 126 | inlist(`code', 34, 39, 92, 96) local badign 1
 		local codes `codes' `code'
 		local jj = `jj' + 1
+	}
+	if `badign' {
+		c_local fx_why ignore
+		exit
 	}
 
 	if `aschars' {

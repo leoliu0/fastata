@@ -255,12 +255,17 @@ program Fast
 		local keys `varlist'
 	}
 	else if `isrow' {
+		* (no exit inside the loop: under version 16, exit inside a loop does not leave the program)
+		local strbad 0
 		foreach v of local varlist {
 			capture confirm numeric variable `v'
 			if _rc & !(inlist("`fcn'", "rowmiss", "rownonmiss") & ("`fcn'" == "rowmiss" | "`strok'" != "")) {
-				c_local fx_reason string
-				exit
+				local strbad 1
 			}
+		}
+		if `strbad' {
+			c_local fx_reason string
+			exit
 		}
 		local vals `varlist'
 	}

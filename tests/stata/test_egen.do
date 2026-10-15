@@ -215,6 +215,10 @@ foreach smp of local samples {
 te "egen v = rowtotal(x1 s)" fallback
 te "egen v = rowmean(x1 s)" fallback
 te "egen v = rownonmiss(x1 s)" fallback
+* a string variable before a numeric one (test_random case 344)
+te "egen double v = rownonmiss(sl xb xi) in 13052" fallback
+te "egen v = rownonmiss(s x1)" fallback
+te "egen v = rowtotal(s x1 x2)" fallback
 te "egen v = rowsd(x1)" fallback
 te "by g: egen v = rowtotal(x1 x2)" fallback bg
 te "egen v = rowmax(x1 x2), by(g)" fallback
@@ -243,6 +247,11 @@ te "egen x1 = mean(x2)" fallback
 te "egen v = mean(s)" fallback
 te "egen v = mean(s), by(g)" fallback
 te "egen v = rank(x1), unique" fallback
+* fallbacks whose original breaks sort ties at random: fastata must not draw from the sort-tie
+* random numbers first (test_random cases 346, 1184, 1594)
+te "egen double v = rank(xs), unique" fallback
+te "egen long v = rank(xs) if u < .7, unique" fallback
+te "egen v = min(xs/3) if xs, by(gm se) missing" fallback
 te "egen v = rank(x1), field track" fallback
 te "egen v = rank(x1), suffix(x)" fallback
 te "egen v = pctile(x1), p(100)" fallback
