@@ -71,4 +71,4 @@ def stata_batch(dofile: Path, *, cwd: Path, home: Path, rw: list[Path], ro: list
     home.mkdir(parents=True, exist_ok=True)
     cmd = bwrap_cmd([str(paths.stata_binary()), "-b", "do", str(dofile)], cwd=cwd, home=home, rw=rw,
                     ro=ro, env=env, network=network)
-    return run(cmd, timeout, cwd / f".{dofile.stem}.stdout")
+    return run(cmd, timeout, cwd / f"{dofile.stem}.stdout")

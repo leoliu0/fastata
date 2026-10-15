@@ -65,8 +65,8 @@ def test_missing_names():
            "(file scheme-plotplain.scheme not found)\n         mm_quantile():  3499  mm_quantile() not found\n")
     got = missing_names(log)
     assert ("command", "reghdfe") in got and ("egen", "nvals") in got
-    assert ("command", "plotplain") in got and ("mata", "mm_quantile") in got
-    assert packages_for("reghdfe") == ["ftools", "reghdfe"]
+    assert ("scheme", "plotplain") in got and ("mata", "mm_quantile") in got
+    assert packages_for("reghdfe") == ["ftools", "require", "reghdfe"]
     assert packages_for("nvals", "egen") == ["egenmore"]
     assert packages_for("plotplain") == ["blindschemes"]
     assert packages_for("mm_quantile", "mata") == ["moremata"]
@@ -116,6 +116,8 @@ def test_backslashes(tmp_path):
 
     assert fix_backslashes('use "$root\\data\\x.dta", clear') == 'use "$root/data/x.dta", clear'
     assert fix_backslashes("do code\\1_prep.do") == "do code/1_prep.do"
+    assert fix_backslashes("global out        ${dir}\\OUT") == "global out        ${dir}/OUT"
+    assert fix_backslashes("local sep \\") == "local sep \\"
     assert fix_backslashes('cd "..\\out"') == 'cd "../out"'
     assert fix_backslashes('local s "\\hline"') == 'local s "\\hline"'
     assert fix_backslashes('esttab using x.tex, prehead("\\begin{table}" "a \\\\")') == \
@@ -140,3 +142,88 @@ def test_local_net_install_kept(tmp_path):
     olds = {p["old"]: p["new"] for p in infer_patches(src, "m.do")}
     assert list(olds) == ["net install x, from(https://a.org/s)"]
     assert static_installs(src) == [{"net": "x", "from": "https://a.org/s"}]
+
+
+def test_switches_locals_placeholders(tmp_path):
+    src = _tree(tmp_path, {
+        "code/setup.do": ('if "$user" == "C:\\Users\\x"{\n\tglobal dirpath "C:/Users/x/pkg"\n}\n'
+                          'if "$user" == "/Users/y"{\n\tglobal dirpath "/Users/y/pkg"\n}\n'
+                          'global code_folder "${dirpath}/code"\ncd "${code_folder}"\n'),
+        "main.do": ('local root "/files"  // <-- edit here\ncd "`root\'/Section3"\n'
+                    'global strict_cut if (year>=2004 & x==1)\nreg y x $strict_cut\nuse "$strict_cut"\n'
+                    '/* header\n   cd "/path/to/replication"\n*/\n* global c "C:/x"\n'),
+        "Section3/a.do": "", "code/b.do": ""})
+    pts = {p["old"]: p["new"] for p in infer_patches(src, "main.do")}
+    assert pts['if "$user" == "C:\\Users\\x"{'] == "if 1 {"
+    assert pts['\tglobal dirpath "C:/Users/x/pkg"'] == '\tglobal dirpath "{ARM}"'
+    assert pts['local root "/files"  // <-- edit here'] == 'local root "{ARM}"  // <-- edit here'
+    assert not any("strict_cut" in k for k in pts)
+    assert not any("path/to" in k or "C:/x" in k for k in pts)
+
+
+def test_graph_export_and_urls(tmp_path):
+    src = _tree(tmp_path, {"m.do": (
+        'graph export "${f}fig1.tif", width(3000) replace\n'
+        'gr export x.png, replace\ngraph export a.emf\ncap graph export b.tif\n'
+        'copy http://fmwww.bc.edu/RePEc/bocode/c/catplot2010.ado catplot.ado\n'
+        'use "https://x.org/d/data.dta", clear\nwebuse nlswork, clear\nwebuse set https://x\n'
+        'di "see https://x.org"\n')})
+    pts = {p["old"]: p for p in infer_patches(src, "m.do")}
+    assert pts['graph export "${f}fig1.tif", width(3000) replace']["new"].startswith("capture noisily graph export")
+    assert pts["graph export a.emf"]["new"] == "capture noisily graph export a.emf"
+    assert "gr export x.png, replace" not in pts and "cap graph export b.tif" not in pts
+    c = pts["copy http://fmwww.bc.edu/RePEc/bocode/c/catplot2010.ado catplot.ado"]
+    assert c["urls"] == ["http://fmwww.bc.edu/RePEc/bocode/c/catplot2010.ado"]
+    assert c["new"].startswith("copy {DEPS}/urls/") and c["new"].endswith("_catplot2010.ado catplot.ado")
+    w = pts["webuse nlswork, clear"]
+    assert w["new"].startswith('use "{DEPS}/urls/') and w["new"].endswith('_nlswork.dta", clear')
+    assert w["urls"] == ["https://www.stata-press.com/data/r19/nlswork.dta"]
+    assert 'use "https://x.org/d/data.dta", clear' in pts
+    assert "webuse set https://x" not in pts and 'di "see https://x.org"' not in pts
+
+
+def test_static_installs_local_lists(tmp_path):
+    src = _tree(tmp_path, {"i.do": ("local pkgs ftools reghdfe estout\nforeach p of local pkgs {\n"
+                                    "    cap noisily ssc install `p', replace\n}\n")})
+    assert static_installs(src) == [{"ssc": "ftools"}, {"ssc": "reghdfe"}, {"ssc": "estout"}]
+
+
+def test_resolution_and_install_text(tmp_path, monkeypatch):
+    from repl import deps
+
+    monkeypatch.setattr(deps, "websee", lambda name: [("dm88_1", "http://www.stata-journal.com/software/sj5-4"),
+                                                     ("renvarlab", "http://fmwww.bc.edu/RePEc/bocode/r")])
+    g = deps.resolution("command", "renvars")
+    assert g["check"] == "capture which renvars"
+    assert g["alts"] == [[{"ssc": "renvars"}],
+                         [{"net": "dm88_1", "from": "http://www.stata-journal.com/software/sj5-4"}],
+                         [{"ssc": "renvarlab"}]]
+    s = deps.resolution("scheme", "tufte", search=False)
+    assert [{"ssc": "scheme_tufte"}] in s["alts"] and s["check"] == "capture findfile scheme-tufte.scheme"
+    r = deps.resolution("command", "reghdfe", search=False)
+    assert r["alts"][0] == [{"ssc": "ftools"}, {"ssc": "require"}, {"ssc": "reghdfe"}]
+    assert r["alts"][-1][-1]["from"].startswith("https://raw.githubusercontent.com/sergiocorreia/reghdfe")
+    t = deps.install_text([g], tmp_path)
+    assert t.count("if !`fxok' {") == 3 and 'di "FXDEP command:renvars `fxok\'"' in t
+    assert "capture noisily net install dm88_1, from(`\"http://www.stata-journal.com/software/sj5-4\"') replace" in t
+    assert "missing" not in deps.missing_names("x")
+    got = deps.missing_names("reghdfe requires uses the require package to maintain its dependencies; please \n"
+                             "Required command 'reghdfe' not found.\n")
+    assert ("command", "require") in got and ("command", "reghdfe") in got
+
+
+def test_one_line_switch_and_cd_placeholder(tmp_path):
+    from repl.patching import infer_cwd
+
+    src = _tree(tmp_path, {
+        "Q/1code/000_master.do": ('local currentuser = c(username)\n'
+                                  'if "`currentuser\'" == "[YOUR USERNAME]"        global drive "/Users/`currentuser\'/[YOUR FILE PATH]"\n'
+                                  'cd "$drive"\nglobal code "$drive/1code"\ndo "$code/a.do"\n'),
+        "Q/1code/a.do": "",
+        "Analysis/Code/0-Master.do": 'cd "..."\nglobal build_dir "Build"\ndo "$build_dir/Clean.do"\n',
+        "Analysis/Build/Clean.do": ""})
+    pts = {p["old"]: p["new"] for p in infer_patches(src, "Q/1code/000_master.do")}
+    assert pts['if "`currentuser\'" == "[YOUR USERNAME]"        global drive "/Users/`currentuser\'/[YOUR FILE PATH]"'] \
+        == 'global drive "{ARM}/Q"'
+    assert pts['cd "..."'] == 'cd "{ARM}/Analysis"'
+    assert infer_cwd(src, "Analysis/Code/0-Master.do") == "Analysis"

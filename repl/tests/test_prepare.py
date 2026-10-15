@@ -34,3 +34,21 @@ def test_missing_ado_folder(tmp_path):
     log = (f"    The folder path\n        [{arm}/code/\n        > ado] in\n"
            f"        adopath({arm}/code/ado) does not exist.\nr(99);\n")
     assert missing_dir(log, arm, arm) == "code/ado"
+
+
+def test_missing_dir_from_echoed_command(tmp_path):
+    arm = tmp_path / "arm_A"
+    (arm / "Base").mkdir(parents=True)
+    log = (f'. global master "{arm}"\n. global pathout "${{master}}/Base/out\n> put"\n\n'
+           '  3.         graph export "${pathout}/figures/fig1a.pdf", replace\nunable to save PDF file\nr(691);\n')
+    log = log.replace('/out\n> put"', '/output"')
+    assert missing_dir(log, arm, arm) == "Base/output/figures"
+    assert missing_dir('. graph export "$nowhere/f.pdf"\nunable to save PDF file\nr(691);\n', arm, arm) is None
+
+
+def test_wrapped_message(tmp_path):
+    arm = tmp_path / "arm_A"
+    (arm / "pkg").mkdir(parents=True)
+    log = f'. cd "${{output_path}}"\nunable to change to {arm}/pk\n> g/output\nr(170);\n'
+    assert failure_message(log)[0] == f"unable to change to {arm}/pkg/output"
+    assert missing_dir(log, arm, arm) == "pkg/output"

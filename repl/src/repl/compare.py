@@ -1,4 +1,4 @@
-"""repl compare <pkg>: file verdicts for arm F against arm A (arm B decides tie dependence).
+"""repl compare <pkg>: file verdicts for the verification arm (V, or F) against arm A.
 
 Compared: every file of an arm that the run created or changed (against the arm's pre-run
 manifest; the harness's own _fxrepl* files and patched sources excluded), plus the package's
@@ -14,8 +14,12 @@ Pair comparison (X vs Y) gives SAME, NEAR or DIFF:
   .xls/.xlsx  cells as text lines, compared as text;
   images, PDF, .gph  skipped and counted;
   anything else  bytes.
-File verdict: SAME (F equals A), NEAR (F within tolerance of A and A equals B), TIE (A differs
-from B: the file depends on sort tie order, F is not judged), DIFF (A equals B and F differs).
+File verdict, arm V (verify mode; strict): SAME (V equals A), NONDET (A differs from a second
+run A2: the package is nondeterministic, V is not judged there), DIFF (anything else, numbers
+within tolerance included). A verify mismatch reported by fastata fails the package too.
+File verdict, arm F: SAME (F equals A), NEAR (F within tolerance of A and A equals B), TIE (A
+differs from B: the file depends on sort tie order, F is not judged), DIFF (A equals B and F
+differs). Log files are judged block by block (one block per command) against A2/B.
 """
 
 from __future__ import annotations
@@ -136,13 +140,7 @@ def kind_of(rel: str) -> str:
     return "bytes"
 
 
-def changed_files(pkg: str, arm: str) -> set[str]:
-    man = json.loads((runner.results_dir(pkg) / f"arm_{arm}_manifest.json").read_text())
-    pre, patched = man["files"], set(man.get("patched", []))
-    post = runner.manifest(runner.arm_dir(pkg, arm))
-    out = {k for k, v in post.items() if pre.get(k) != v}
-    out |= {k for k in pre if k not in post}  # deleted by the run
-    return out - patched
+changed_files = runner.changed_files
 
 
 def _read_side(pkg: str, arm: str, rel: str) -> tuple[Path | None, str]:
@@ -150,6 +148,8 @@ def _read_side(pkg: str, arm: str, rel: str) -> tuple[Path | None, str]:
     if rel == WRAPPER_ID:
         return root / runner.WRAPPER_LOG, str(root)
     p = root / rel
+    if not p.exists() and runner.changed_path(pkg, arm).exists() and rel not in changed_files(pkg, arm):
+        p = paths.pkg_dir(pkg) / "src" / rel  # pruned arm: the run left this file as it was
     return (p if p.exists() else None), str(root)
 
 
@@ -233,81 +233,104 @@ def units(text: str, logish: bool) -> list[str]:
     return out
 
 
-def three_way(rel: str, texts: dict[str, str], roots: dict[str, str]) -> tuple[str, str] | None:
-    """File verdict from a unit-by-unit comparison of arms A, F and B, when all three have the
-    same number of units: a unit that differs between A and B is a tie unit; F is judged on the
-    other units. None when the units do not line up."""
+# verification arm -> (reference arm that shows the package's own variation, verdict for files
+# that vary between A and the reference, whether numbers within tolerance pass)
+MODES = {"V": ("A2", "NONDET", False), "F": ("B", "TIE", True)}
+VERDICTS = ("SAME", "NEAR", "TIE", "NONDET", "DIFF", "SKIP", "ERR")
+
+
+def three_way(rel: str, texts: dict[str, str], roots: dict[str, str], x: str = "F", ref: str = "B",
+              var: str = "TIE", tolerant: bool = True) -> tuple[str, str] | None:
+    """File verdict from a unit-by-unit comparison of arms A, x and ref, when all three have the
+    same number of units: a unit that differs between A and ref varies by itself; x is judged on
+    the other units (numbers within tolerance pass only when tolerant). None when the units do
+    not line up."""
     logish = rel == WRAPPER_ID or Path(rel).suffix.lower() in (".log", ".smcl")
     u = {k: units(normalize(t, roots[k]), logish) for k, t in texts.items()}
-    if not (len(u["A"]) == len(u["F"]) == len(u["B"])):
+    if not (len(u["A"]) == len(u[x]) == len(u[ref])):
         return None
     ties = near = 0
-    for i, (a, f, b) in enumerate(zip(u["A"], u["F"], u["B"])):
+    for i, (a, f, b) in enumerate(zip(u["A"], u[x], u[ref])):
         if a == f:
             continue
         if a != b:
             ties += 1
             continue
         v, why = cmp_text(a + "\n", f + "\n", "", "")
-        if v == "DIFF":
+        if v == "DIFF" or not tolerant:
             return "DIFF", f"unit {i + 1} of {len(u['A'])} ({a.splitlines()[0][:60]!r}): {why}"
-        near += v == "NEAR"
+        near += 1
     if near:
-        return "NEAR", f"{near} unit(s) within tolerance, {ties} tie unit(s)"
-    return ("TIE", f"{ties} of {len(u['A'])} units differ between A and B; F equals A elsewhere") if ties else ("SAME", "")
+        return "NEAR", f"{near} unit(s) within tolerance, {ties} unit(s) varying by themselves"
+    if ties:
+        return var, f"{ties} of {len(u['A'])} units differ between A and {ref}; {x} equals A elsewhere"
+    return "SAME", ""
 
 
-def file_verdict(af: tuple[str, str], ab: tuple[str, str] | None) -> str:
-    """Combines A-vs-F and A-vs-B pair verdicts into SAME, NEAR, TIE, DIFF, SKIP or NEEDB."""
+def file_verdict(af: tuple[str, str], ab: tuple[str, str] | None, var: str = "TIE", tolerant: bool = True) -> str:
+    """Combines the A-vs-x and A-vs-reference pair verdicts into SAME, NEAR, TIE/NONDET (var),
+    DIFF, SKIP or NEEDREF."""
     v = af[0]
     if v in ("SAME", "SKIP"):
         return v
     if ab is None:
-        return "NEEDB"
+        return "NEEDREF"
     if ab[0] != "SAME":
-        return "TIE"
-    return "NEAR" if v == "NEAR" else "DIFF"
+        return var
+    return "NEAR" if v == "NEAR" and tolerant else "DIFF"
 
 
-def compare(pkg: str, force: bool = False) -> dict:
-    """Compares arms A and F (B when present). Returns the stage record; NEEDB if B is needed."""
+def verify_totals(calls: dict) -> dict[str, int]:
+    return {k: sum(v.get(k, 0) for v in calls.values()) for k in ("verify_ok", "verify_mismatch", "verify_skipped")}
+
+
+def compare(pkg: str, force: bool = False, arm: str = "V") -> dict:
+    """Compares verification arm V (or F) with arm A. Files that differ go to a reference run
+    (A2 for V, B for F); returns {'needref': arm} when that run is needed first. V is strict:
+    a file differing between A and V is DIFF unless it also differs between A and A2 (NONDET),
+    and any verify mismatch fails the package."""
     if not force and state.done(pkg, "compare"):
         return state.stage(pkg, "compare") or {}
-    if not (state.ok(pkg, "run_A") and state.ok(pkg, "run_F")):
-        return {"ok": False, "reason": "arms A and F have not both finished"}
-    if not (runner.arm_dir(pkg, "A").exists() and runner.arm_dir(pkg, "F").exists()):
-        return {"ok": False, "reason": "arm directories are gone (deleted after comparing); "
-                "rerun with repl reset <pkg> --from run, then repl pipeline --only <pkg>"}
-    have_b = state.ok(pkg, "run_B") and runner.arm_dir(pkg, "B").exists()
-    files = changed_files(pkg, "A") | changed_files(pkg, "F") | {WRAPPER_ID}
-    if have_b:
-        files |= changed_files(pkg, "B")
+    ref, var, tolerant = MODES[arm]
+    if not (state.ok(pkg, "run_A") and state.ok(pkg, f"run_{arm}")):
+        return {"ok": False, "reason": f"arms A and {arm} have not both finished"}
+    if not (runner.has_arm(pkg, "A") and runner.has_arm(pkg, arm)):
+        return {"ok": False, "reason": "arm directories are gone; rerun with repl reset <pkg> --from run, "
+                "then repl pipeline --only <pkg>"}
+    have_ref = state.ok(pkg, f"run_{ref}") and runner.has_arm(pkg, ref)
+    files = changed_files(pkg, "A") | changed_files(pkg, arm) | {WRAPPER_ID}
+    if have_ref:
+        files |= changed_files(pkg, ref)
     files_l = sorted(files)
-    af = compare_pairs(pkg, "A", "F", files_l)
+    af = compare_pairs(pkg, "A", arm, files_l)
     pending = [f for f in files_l if af[f][0] not in ("SAME", "SKIP")]
-    if pending and not have_b:
-        return {"ok": False, "needb": True, "pending": len(pending)}
-    ab = compare_pairs(pkg, "A", "B", pending) if pending else {}
+    if pending and not have_ref:
+        return {"ok": False, "needref": ref, "pending": len(pending)}
+    ab = compare_pairs(pkg, "A", ref, pending) if pending else {}
     refined: dict[str, tuple[str, str]] = {}
     for f in pending:
         if kind_of(f) == "text" and ab[f][0] not in ("SAME", "ERR") and af[f][0] != "ERR":
             texts, roots = {}, {}
-            for arm in "AFB":
-                p, roots[arm] = _read_side(pkg, arm, f)
-                texts[arm] = p.read_text(errors="replace") if p else ""
+            for a in ("A", arm, ref):
+                p, roots[a] = _read_side(pkg, a, f)
+                texts[a] = p.read_text(errors="replace") if p else ""
                 if f == WRAPPER_ID:
-                    texts[arm] = runner.log_region(texts[arm]) or ""
-            r = three_way(f, texts, roots)
+                    texts[a] = runner.log_region(texts[a]) or ""
+            r = three_way(f, texts, roots, arm, ref, var, tolerant)
             if r:
                 refined[f] = r
     rows = []
-    counts = {k: 0 for k in ("SAME", "NEAR", "TIE", "DIFF", "SKIP", "ERR")}
+    counts = {k: 0 for k in VERDICTS}
     for f in files_l:
-        v = refined[f][0] if f in refined else "ERR" if af[f][0] == "ERR" else file_verdict(af[f], ab.get(f))
+        v = refined[f][0] if f in refined else "ERR" if af[f][0] == "ERR" else file_verdict(af[f], ab.get(f), var, tolerant)
         counts[v] += 1
         rows.append({"file": f, "verdict": v, "af": list(af[f]), "ab": list(ab[f]) if f in ab else None,
                      "units": refined[f][1] if f in refined else None})
     (runner.results_dir(pkg) / "compare.json").write_text(json.dumps(rows, indent=1))
-    verdict = "PASS" if counts["DIFF"] == 0 and counts["ERR"] == 0 else "FAIL"
-    return state.record(pkg, "compare", True, verdict=verdict, counts=counts,
-                        notes=[r for r in rows if r["verdict"] in ("NEAR", "TIE", "DIFF", "ERR")][:50])
+    calls = (state.stage(pkg, f"run_{arm}") or {}).get("counts", {})
+    vt = verify_totals(calls)
+    mismatches = [f"{c}: {m}" for c, v in sorted(calls.items()) for m in v.get("mismatches", [])]
+    ok = counts["DIFF"] == 0 and counts["ERR"] == 0 and vt["verify_mismatch"] == 0
+    return state.record(pkg, "compare", True, arm=arm, verdict="PASS" if ok else "FAIL", counts=counts,
+                        verify=vt, mismatches=mismatches[:100],
+                        notes=[r for r in rows if r["verdict"] in ("NEAR", "TIE", "NONDET", "DIFF", "ERR")][:50])

@@ -29,7 +29,9 @@ def test_cmp_text_numbers():
 
 def test_file_verdict():
     assert file_verdict(("SAME", ""), None) == "SAME"
-    assert file_verdict(("NEAR", ""), None) == "NEEDB"
+    assert file_verdict(("NEAR", ""), None) == "NEEDREF"
+    assert file_verdict(("NEAR", ""), ("SAME", ""), "NONDET", False) == "DIFF"
+    assert file_verdict(("DIFF", ""), ("DIFF", ""), "NONDET", False) == "NONDET"
     assert file_verdict(("NEAR", ""), ("SAME", "")) == "NEAR"
     assert file_verdict(("DIFF", ""), ("SAME", "")) == "DIFF"
     assert file_verdict(("DIFF", ""), ("DIFF", "")) == "TIE"
@@ -69,6 +71,11 @@ def test_aggregate_calls(tmp_path):
     p.write_text("egen,fallback,not implemented\negen,fast,\nisid,fallback,string blanks, x\n")
     a = aggregate_calls(p)
     assert a["egen"]["fast"] == 1 and a["egen"]["fallback"] == 1
+    p.write_text("egen,fast,\negen,verify_ok,\negen,verify_mismatch,m differs in 3 obs\n"
+                 "isid,verify_skipped,too large\n")
+    b = aggregate_calls(p)
+    assert b["egen"]["verify_ok"] == 1 and b["egen"]["mismatches"] == ["m differs in 3 obs"]
+    assert b["isid"]["skipped"] == {"too large": 1} and b["isid"]["fallback"] == 0
     assert a["isid"]["last_reason"] == "string blanks, x"
     assert a["xtile"]["fast"] == 0
 
@@ -86,6 +93,11 @@ def test_three_way():
     assert three_way("x.log", {**t, "F": base.replace("1.5", "1.5000000000001")}, r)[0] == "NEAR"
     assert three_way("x.log", {**t, "F": base + ". extra\n"}, r) is None
     assert three_way("t.csv", {"A": "a,1\nb,2\n", "B": "a,1\nb,3\n", "F": "a,2\nb,2\n"}, r)[0] == "DIFF"
+    # strict (arm V against A2): numbers within tolerance are a difference; A2 variation is NONDET
+    tv = {"A": t["A"], "A2": t["B"], "V": base.replace("1.5", "1.5000000000001")}
+    rv = {"A": "", "A2": "", "V": ""}
+    assert three_way("x.log", tv, rv, "V", "A2", "NONDET", False)[0] == "DIFF"
+    assert three_way("x.log", {**tv, "V": base.replace("tie 7", "tie 9")}, rv, "V", "A2", "NONDET", False)[0] == "NONDET"
 
 
 def test_adopath_listing_normalised():

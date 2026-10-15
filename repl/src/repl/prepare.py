@@ -52,10 +52,16 @@ def failure_message(text: str) -> tuple[str, list[str]]:
     for i, ln in enumerate(lines):
         if re.fullmatch(r"r\(\d+\);.*", ln.strip()):
             j = i
-            while j > 0 and lines[j - 1][:1].isspace():
+            while j > 0 and (lines[j - 1][:1].isspace() or lines[j - 1].startswith("> ")) \
+                    and not _ECHO_RE.match(lines[j - 1]):
                 j -= 1
-            if j > 0 and lines[j - 1].strip() and not lines[j - 1].startswith((". ", "> ")):
+            if j > 0 and lines[j - 1].strip() and not _ECHO_RE.match(lines[j - 1]) \
+                    and not lines[j - 1].startswith("> "):
                 j -= 1
+            elif j < i and lines[j].startswith("> "):
+                # only an echoed command's continuation lines: no message
+                while j < i and lines[j].startswith("> "):
+                    j += 1
             return unwrap(lines[j:i]), lines[:j]
     return "", lines
 
@@ -68,6 +74,44 @@ def current_dir(before: list[str], arm_root: Path, default: Path) -> Path:
         if s.startswith(root) and Path(s).is_dir():
             return Path(s)
     return default
+
+
+_ECHO_RE = re.compile(r"^(?:\. |\s*\d+\.\s)")
+_SAVE_FAIL = re.compile(r"unable to save|could not be saved|cannot be saved|unable to (?:open|create) file")
+_TARGET_RE = re.compile(r"\b(?:export|saving\(|save|using)\s*(?:`\"|\")?([^\",)]+?)(?:\"'|\"|,|\)|$)")
+_GLOBAL_ECHO_RE = re.compile(r"^\s*(?:\.|\d+\.)\s+gl(?:o(?:b(?:a(?:l)?)?)?)?\s+(\w+)\s+(?:=\s*)?(.*)$")
+
+
+def echoed_commands(lines: list[str]) -> list[str]:
+    """The commands echoed in log lines (". cmd" or "  N. cmd" in loops), continuations joined."""
+    out: list[str] = []
+    for ln in lines:
+        if _ECHO_RE.match(ln):
+            out.append(ln)
+        elif ln.startswith("> ") and out:
+            out[-1] += ln[2:]
+    return out
+
+
+def expand_globals(s: str, cmds: list[str]) -> str | None:
+    """s with $name and ${name} replaced by the last values the echoed global commands gave;
+    None if a macro is left."""
+    vals: dict[str, str] = {}
+    for c in cmds:
+        m = _GLOBAL_ECHO_RE.match(c)
+        if m:
+            v = m.group(2).strip()
+            if v.startswith('`"') and v.endswith("\"'"):
+                v = v[2:-2]
+            elif len(v) >= 2 and v[0] == v[-1] == '"':
+                v = v[1:-1]
+            vals[m.group(1)] = v
+    for _ in range(6):
+        new = re.sub(r"\$\{(\w+)\}|\$([A-Za-z_]\w*)", lambda m: vals.get(m.group(1) or m.group(2), m.group(0)), s)
+        if new == s:
+            break
+        s = new
+    return None if ("$" in s or "`" in s) else s
 
 
 def missing_dir(text: str, arm_root: Path, cwd: Path) -> str | None:
@@ -88,6 +132,13 @@ def missing_dir(text: str, arm_root: Path, cwd: Path) -> str | None:
             if m:
                 target = m.group(1).strip().strip('"').replace("\\", "/")
                 break
+        else:
+            if _SAVE_FAIL.search(msg):
+                cmds = echoed_commands(before)
+                mt = _TARGET_RE.search(re.sub(_ECHO_RE, "", cmds[-1], count=1)) if cmds else None
+                path = expand_globals(mt.group(1).strip(), cmds) if mt else None
+                if path:
+                    target = os.path.dirname(path.replace("\\", "/").rstrip("/")) or "."
     if target is None:
         return None
     here = current_dir(before, arm_root, cwd)
@@ -99,6 +150,30 @@ def missing_dir(text: str, arm_root: Path, cwd: Path) -> str | None:
     if p.exists() or str(rel) == "." or rel.parts[0].startswith(runner.HARNESS_PREFIX):
         return None
     return str(rel)
+
+
+def fetch_urls(pkg: str, patches: list[dict], log=print) -> list[dict]:
+    """Downloads the files patches read from the web into <pkg>/_deps/urls (the runs have no
+    network); drops a patch whose download fails, so the line stays as the package wrote it."""
+    from . import net
+    from .patching import url_dest
+
+    keep = []
+    deps = paths.pkg_dir(pkg) / "_deps"
+    for pt in patches:
+        ok = True
+        for url in pt.get("urls", []):
+            dest = Path(url_dest(url).replace("{DEPS}", str(deps)))
+            if dest.exists():
+                continue
+            try:
+                net.download(url, dest)
+            except Exception as e:  # noqa: BLE001 - the run then fails as it would have
+                log(f"{pkg}: could not download {url}: {e}")
+                ok = False
+        if ok:
+            keep.append(pt)
+    return keep
 
 
 def prepare(pkg: str, force: bool = False, log=print) -> dict:
@@ -118,6 +193,7 @@ def prepare(pkg: str, force: bool = False, log=print) -> dict:
         "deps": old.get("deps", []),
         "mkdirs": [],
     }
+    meta["patches"] = fetch_urls(pkg, meta["patches"], log)
     save_meta(pkg, meta)
     tried: set[str] = set(meta["deps"])
     static = [it for it in deps.static_installs(src)
@@ -141,16 +217,16 @@ def prepare(pkg: str, force: bool = False, log=print) -> dict:
             meta["mkdirs"].append(d)
             save_meta(pkg, meta)
             continue
-        want = []
+        groups = []
         for kind, name in deps.missing_names(text):
-            for p in deps.packages_for(name, kind):
-                if f"ssc:{p}" not in tried and {"ssc": p} not in want:
-                    want.append({"ssc": p})
-        if not want:
+            g = deps.resolution(kind, name)
+            if g["label"] not in tried:
+                groups.append(g)
+                tried.add(g["label"])
+        if not groups:
             break
-        ok, failed = deps.install(pkg, want, log)
-        meta["deps"] += ok
-        tried |= set(ok) | set(failed)
+        ok, failed = deps.install_groups(pkg, groups, log)
+        meta["deps"] += [x for x in ok if x not in meta["deps"]]
         save_meta(pkg, meta)
         if not ok:
             break

@@ -100,6 +100,34 @@ class Tree:
         return top
 
 
+def url_dest(url: str) -> str:
+    """Where a URL's file is kept: {DEPS}/urls/<hash>_<name>."""
+    import hashlib
+
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]) or "file"
+    return "{DEPS}/urls/" + hashlib.md5(url.encode()).hexdigest()[:8] + "_" + name
+
+
+def _local_refs(text: str, name: str) -> tuple[list[list[str]], bool]:
+    n = re.escape(name)
+    sep = re.compile(r"`" + n + r"'[\\/]([^\"'`,;()$\n]*)")
+    refs = [_norm(m.group(1).strip()) for m in sep.finditer(text)]
+    bare = re.search(r"(?:\b(?:cd|use|using|do|run|save)\s+|\")`" + n + r"'\s*(?:\"|,|$)", text, re.M)
+    return refs, bool(refs or bare)
+
+
+def _comment_mask(text: str) -> list[bool]:
+    """Per line: True when the line is a comment (inside /* */, or starting with * or //)."""
+    from .stataparse import strip_block_comments
+
+    stripped = strip_block_comments(text).split("\n")
+    out = []
+    for raw, st in zip(text.split("\n"), stripped):
+        s = st.strip()
+        out.append((raw.strip() != "" and s == "") or s.startswith(("*", "//")))
+    return out
+
+
 def _global_refs(texts: dict[str, str], name: str) -> tuple[list[list[str]], bool, bool]:
     """(path parts after $name/..., used as a path at all, used without a separator as in
     ${name}file.dta) over every do-file."""
@@ -124,7 +152,17 @@ def _global_refs(texts: dict[str, str], name: str) -> tuple[list[list[str]], boo
 _REL_RE = re.compile(r"(?:\"([^\"$`]+)\"|\b(?:use|using|do|run|save|include)\s+([^\s,\"$`]+))")
 
 
+_PLAIN_GLOBAL_RE = re.compile(r"^\s*gl(?:o(?:b(?:a(?:l)?)?)?)?\s+(\w+)\s+\"?([^\"$`\n/\\:]*(?:[/\\][^\"$`\n:]*)?)\"?\s*(?://.*)?$", re.M)
+
+
 def _relative_refs(text: str) -> list[list[str]]:
+    """Relative paths the text reads or runs, with globals the text sets to relative paths
+    expanded ($build/x.do with global build "Build")."""
+    vals = {m.group(1): m.group(2).strip() for m in _PLAIN_GLOBAL_RE.finditer(text)
+            if m.group(2).strip() and not is_abs(m.group(2).strip())}
+    if vals:
+        text = re.sub(r"\$\{(\w+)\}|\$([A-Za-z_]\w*)",
+                      lambda m: vals.get(m.group(1) or m.group(2), m.group(0)), text)
     out = []
     for m in _REL_RE.finditer(text):
         v = m.group(1) or m.group(2) or ""
@@ -136,8 +174,24 @@ def _relative_refs(text: str) -> list[list[str]]:
 
 # net install/from/get with a local source (no URL)
 LOCAL_NET_RE = re.compile(r"\bnet\s+(?:(?:inst(?:a(?:l(?:l)?)?)?|get)\b.*\bfrom\(\s*(?!\"?https?:)[^)]*\)|from\s+(?!\"?https?:))", re.I)
-USER_IF_RE = re.compile(r"^(\s*)if\s+(?=[^{]*c\((?:username|hostname)\))[^{]*\{(.*)$")
+# if-branches that pick a user's machine: on c(username) or c(hostname), or on a macro named like
+# user, computer, machine or host compared with ==
+_USER_COND = (r"(?:c\((?:username|hostname)\)|(?=[^{]*==)[$`]\{?\w*(?:user|usr|computer|machine|host|who)\w*"
+              r"|(?=[^{]*==)[$`]\{?(?:pc|me)\b)")
+USER_IF_RE = re.compile(r"^(\s*)if\s+(?=[^{]*" + _USER_COND + r")[^{]*\{(.*)$", re.I)
+# one-line form: if "`c(username)'" == "x" global root "C:/..."
+USER_IF1_RE = re.compile(r"^(\s*)if\s+(?=.*" + _USER_COND + r")[^{]*?\s((?:gl(?:o(?:b(?:a(?:l)?)?)?)?|cd)\s.*)$", re.I)
+LOCAL_RE = re.compile(r"^(\s*" + _PFX + r"loc(?:al)?\s+([A-Za-z_]\w*)\s*(?:=\s*)?)(.+?)\s*$")
+PLACEHOLDER_RE = re.compile(r"[\[<{]|/|\\|path|your|here|xxx|\.\.\.|change|insert|directory|folder|dropbox", re.I)
+# graph formats console Stata cannot write (tif: no translator; gif, emf, wmf: Windows/Mac only)
+GEXPORT_RE = re.compile(r"\bgr(?:a(?:p(?:h)?)?)?\s+export\b(?=.*(?:\.(?:tiff?|gif|emf|wmf)\b|\bas\(\s*(?:tif|gif|emf|wmf)))", re.I)
+_URL_CMDS = r"(?:copy|u(?:se?)?|insheet|import\s+\w+|merge|append|joinby|do|ru(?:n)?|include|infile|infix|cross)"
+URL_LINE_RE = re.compile(r"^\s*(?:" + _PFX + r")" + _URL_CMDS + r"\b.*?(https?://[^\s\"',`$]+)", re.I)
+WEBUSE_RE = re.compile(r"^(\s*(?:" + _PFX + r"))webuse\s+(?!set\b|query\b)([A-Za-z0-9_]+)(\.dta)?\b", re.I)
+WEBUSE_URL = "https://www.stata-press.com/data/r19/{}.dta"
 TOOL_RE = re.compile(r"^(\s*)(" + _PFX + r")((?:gtools|ftools|reghdfe)\s*,\s*(?:upgrade|install|compile|reload)\b.*)$")
+# global/local definitions with an unquoted value: global out ${dir}\OUT
+_MACRO_BARE_RE = re.compile(r"^(\s*(?:gl(?:o(?:b(?:a(?:l)?)?)?)?|loc(?:al)?)\s+\w+\s+)([^\s\"`=][^\s\"]*\\[^\s\"]*)(?=\s*(?://.*)?$)")
 _PATH_CMD_RE = re.compile(r"\b(do|run|include|use|using|cd|save|saving\()\s*([^\s\"`',]*\\[^\s\"`',]*)")
 
 
@@ -165,7 +219,13 @@ def fix_backslashes(line: str) -> str:
         v = m.group(2)
         return m.group(1) + " " + re.sub(r"\\(?![`$])", "/", v) if _pathlike_backslashes(v) else m.group(0)
 
-    return _PATH_CMD_RE.sub(b, out)
+    out = _PATH_CMD_RE.sub(b, out)
+
+    def g(m: re.Match) -> str:
+        v = m.group(2)
+        return m.group(1) + re.sub(r"\\(?![`$])", "/", v) if _pathlike_backslashes(v) else m.group(0)
+
+    return _MACRO_BARE_RE.sub(g, out)
 
 
 def _exists_dir(tree: Tree, base: str, value: str) -> bool:
@@ -210,7 +270,10 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
     for rel, text in texts.items():
         user_done = False
         in_mata = False
-        for line in text.splitlines():
+        mask = _comment_mask(text.replace("\r\n", "\n").replace("\r", "\n"))
+        for i, line in enumerate(text.splitlines()):
+            if i < len(mask) and mask[i]:
+                continue
             st = line.strip()
             if re.match(r"mata\s*(?::|\{)?\s*$", st):
                 in_mata = True
@@ -220,8 +283,13 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
                 continue
             new, whys = line, []
             mu = USER_IF_RE.match(new)
+            mu1 = None if mu else USER_IF1_RE.match(new)
             if mu and not user_done:
                 new = f"{mu.group(1)}if 1 {{{mu.group(2)}"
+                whys.append("user switch")
+                user_done = True
+            elif mu1 and not user_done:
+                new = mu1.group(1) + mu1.group(2)
                 whys.append("user switch")
                 user_done = True
             mi = INSTALL_RE.match(new) or TOOL_RE.match(new)
@@ -230,25 +298,49 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
             if mi:
                 new = f"{mi.group(1)}capture {mi.group(2)}{mi.group(3)}"
                 whys.append("install line (no network in the run)")
+            if GEXPORT_RE.search(new) and not re.match(r"\s*cap", new):
+                new = re.sub(r"^(\s*)", r"\1capture noisily ", new, count=1)
+                whys.append("graph format console Stata cannot write")
+            mu = URL_LINE_RE.match(new)
+            if mu and not INSTALL_RE.match(new):
+                new = new.replace(mu.group(1), url_dest(mu.group(1)))
+                whys.append("url " + mu.group(1))
+            mw = WEBUSE_RE.match(new)
+            if mw:
+                url = WEBUSE_URL.format(mw.group(2))
+                new = f'{mw.group(1)}use "{url_dest(url)}"' + new[mw.end():]
+                whys.append("url " + url)
             m = GLOBAL_RE.match(new)
-            m2 = None if m else CD_RE.match(new)
+            ml = None if m else LOCAL_RE.match(new)
+            m2 = None if (m or ml) else CD_RE.match(new)
             target = None
-            if m or m2:
-                head, rest = (m.group(1), m.group(3)) if m else (m2.group(1), m2.group(2))
+            if m or m2 or ml:
+                head, rest = (m.group(1), m.group(3)) if m else (ml.group(1), ml.group(3)) if ml else (m2.group(1), m2.group(2))
                 pv = path_value(rest)
                 if pv:
                     value, s, e = pv
                     plain = "$" not in value and "`" not in value
-                    if m:
+                    after = rest[e + (1 if s == 1 else 2 if s == 2 else 0):].strip()
+                    alone = after == "" or after.startswith(("//", "/*"))
+                    placeholder = alone and (not value.strip() or bool(PLACEHOLDER_RE.search(value)))
+                    if ml:
+                        lrefs, lused = _local_refs(text, ml.group(2))
+                        if lused and is_abs(value) and alone:
+                            target = tree.best(lrefs, _norm(re.split(r"[`$]", value)[0]), master_dir)
+                            suffix = "/" if value.endswith(("/", "\\")) else ""
+                            whys.append("root path (local)")
+                    elif m:
                         name = m.group(2)
                         if name not in grefs:
                             grefs[name] = _global_refs(texts, name)
                         refs, used, glue = grefs[name]
-                        if used and (is_abs(value) or (plain and (not value.strip() or not _exists_dir(tree, cwd, value)))):
+                        if used and (is_abs(value) or (plain and placeholder and (not value.strip() or not _exists_dir(tree, cwd, value)))):
                             target = tree.best(refs, _norm(re.split(r"[`$]", value)[0]), master_dir)
                             suffix = "/" if glue or value.endswith(("/", "\\")) else ""
                             whys.append("root path (global)")
-                    elif is_abs(value) or (plain and value.strip() == ""):
+                    elif is_abs(value) or (plain and (value.strip() == "" or (
+                            placeholder and not _exists_dir(tree, cwd, value)
+                            and not _exists_dir(tree, str(Path(rel).parent), value)))):
                         target = tree.best(_relative_refs(texts[rel]), _norm(re.split(r"[`$]", value)[0]), cwd)
                         suffix = ""
                         whys.append("root path (cd)")
@@ -260,7 +352,12 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
                 new = fixed
                 whys.append("path separators")
             if new != line:
-                patches.append({"file": rel, "old": line, "new": new, "why": ", ".join(whys)})
+                pt = {"file": rel, "old": line, "new": new, "why": ", ".join(w for w in whys if not w.startswith("url "))}
+                urls = [w[4:] for w in whys if w.startswith("url ")]
+                if urls:
+                    pt["urls"] = urls
+                    pt["why"] = ", ".join(filter(None, [pt["why"], "file from the web (downloaded beforehand)"]))
+                patches.append(pt)
     return patches
 
 
@@ -285,6 +382,7 @@ def manual_patches(pkg: str) -> list[dict]:
 def apply_patches(root: Path, meta: dict, pkg: str | None = None) -> list[str]:
     """Applies meta['patches'] and the manual patches to the copy in root; returns patched files."""
     arm = str(root)
+    deps = str(paths.pkg_dir(pkg or root.parent.name) / "_deps")
     changed: dict[str, str] = {}
 
     def text(rel: str) -> str | None:
@@ -298,7 +396,7 @@ def apply_patches(root: Path, meta: dict, pkg: str | None = None) -> list[str]:
     for pt in meta.get("patches", []):
         t = text(pt["file"])
         if t is not None:
-            changed[pt["file"]] = t.replace(pt["old"], pt["new"].replace("{ARM}", arm))
+            changed[pt["file"]] = t.replace(pt["old"], pt["new"].replace("{ARM}", arm).replace("{DEPS}", deps))
     for pt in manual_patches(pkg or root.parent.name):
         files = [pt["file"]] if pt.get("file") else [str(p.relative_to(root)) for p in root.rglob("*.do")]
         for rel in files:
