@@ -70,7 +70,7 @@ def static_installs(src: Path) -> list[dict]:
                 continue
             m = NET_FROM_RE.search(s)
             if m:
-                last_from = m.group(1)
+                last_from = m.group(1) if m.group(1).lower().startswith(("http://", "https://")) else None
             for m in SSC_LOOP_RE.finditer(s):
                 for name in loops.get(m.group(1), []):
                     add({"ssc": name.strip('"')})
@@ -78,7 +78,8 @@ def static_installs(src: Path) -> list[dict]:
                 add({"ssc": m.group(1).strip('"')})
             m = NET_RE.search(s)
             if m:
-                add({"net": m.group(1), "from": m.group(2)})
+                if m.group(2).strip().lower().startswith(("http://", "https://")):
+                    add({"net": m.group(1), "from": m.group(2).strip()})
             elif last_from:
                 m = NET_PLAIN_RE.search(s)
                 if m:

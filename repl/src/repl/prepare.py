@@ -27,7 +27,7 @@ _WRITE_FAIL = [
 _DIR_FAIL = [
     re.compile(r"\bdirectory (.+?) not found\b"),
     re.compile(r"\bunable to change to (.+?)$"),
-    re.compile(r"\bfolder (.+?) (?:does not exist|not found)\b"),
+    re.compile(r"\bfolder path \[(.+?)\]"),
 ]
 
 

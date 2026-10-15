@@ -11,6 +11,7 @@
 program _fxrepl_cmpdta
 	version 16
 	args pairs out
+	capture set maxvar 120000
 	tempname fi fo
 	file open `fi' using `"`pairs'"', read text
 	file open `fo' using `"`out'"', write text replace

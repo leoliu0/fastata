@@ -134,6 +134,8 @@ def _relative_refs(text: str) -> list[list[str]]:
     return out
 
 
+# net install/from/get with a local source (no URL)
+LOCAL_NET_RE = re.compile(r"\bnet\s+(?:(?:inst(?:a(?:l(?:l)?)?)?|get)\b.*\bfrom\(\s*(?!\"?https?:)[^)]*\)|from\s+(?!\"?https?:))", re.I)
 USER_IF_RE = re.compile(r"^(\s*)if\s+(?=[^{]*c\((?:username|hostname)\))[^{]*\{(.*)$")
 TOOL_RE = re.compile(r"^(\s*)(" + _PFX + r")((?:gtools|ftools|reghdfe)\s*,\s*(?:upgrade|install|compile|reload)\b.*)$")
 _PATH_CMD_RE = re.compile(r"\b(do|run|include|use|using|cd|save|saving\()\s*([^\s\"`',]*\\[^\s\"`',]*)")
@@ -223,6 +225,8 @@ def infer_patches(src: Path, master_rel: str, cwd: str | None = None) -> list[di
                 whys.append("user switch")
                 user_done = True
             mi = INSTALL_RE.match(new) or TOOL_RE.match(new)
+            if mi and LOCAL_NET_RE.search(new):
+                mi = None  # installs from the package's own files work in the run (PLUS is writable)
             if mi:
                 new = f"{mi.group(1)}capture {mi.group(2)}{mi.group(3)}"
                 whys.append("install line (no network in the run)")

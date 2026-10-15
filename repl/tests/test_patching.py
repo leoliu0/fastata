@@ -132,3 +132,11 @@ def test_more_missing_names():
                         "please install `x'\n")
     assert ("command", "reghdfe") in got and ("command", "ftools") in got
     assert all(n != "`x'" for _, n in got)
+
+
+def test_local_net_install_kept(tmp_path):
+    src = _tree(tmp_path, {"m.do": ('net install mytool, from("$root/ado") replace\n'
+                                    'net from "ado"\nnet install x, from(https://a.org/s)\n')})
+    olds = {p["old"]: p["new"] for p in infer_patches(src, "m.do")}
+    assert list(olds) == ["net install x, from(https://a.org/s)"]
+    assert static_installs(src) == [{"net": "x", "from": "https://a.org/s"}]

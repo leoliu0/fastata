@@ -58,7 +58,8 @@ def test_wrapper_text(tmp_path, monkeypatch):
     from pathlib import Path
     w = wrapper_text("dataverse-X", "F", Path("/r/arm_F/code/master.do"))
     assert 'cd `"/r/arm_F/code"\'' in w and "FX_REPL_NOT_ACTIVE" in w and "sortseed" not in w
-    assert f'sysdir set PLUS `"{tmp_path}/pkgs/dataverse-X/_deps/plus/"\'' in w
+    assert f'sysdir set PLUS `"{tmp_path}/pkgs/dataverse-X/arm_F/_fxrepl_plus/"\'' in w
+    assert "mata: mata mlib index" in w
     b = wrapper_text("dataverse-X", "B", Path("/r/arm_B/m.do"))
     assert "set sortseed 20261015" in b and "FX_REPL_NOT_ACTIVE" not in b
 
@@ -85,3 +86,10 @@ def test_three_way():
     assert three_way("x.log", {**t, "F": base.replace("1.5", "1.5000000000001")}, r)[0] == "NEAR"
     assert three_way("x.log", {**t, "F": base + ". extra\n"}, r) is None
     assert three_way("t.csv", {"A": "a,1\nb,2\n", "B": "a,1\nb,3\n", "F": "a,2\nb,2\n"}, r)[0] == "DIFF"
+
+
+def test_adopath_listing_normalised():
+    a = '  [1]  (BASE)      "/s/ado/base/"\n  [2]  (SITE)      "/s/site/"\n  [3]              "."\n'
+    f = ('  [1]              "/r/arm_F/_fxrepl_home/ado/plus/fastata/"\n'
+         '  [2]  (BASE)      "/s/ado/base/"\n  [3]  (SITE)      "/s/site/"\n  [4]              "."\n')
+    assert normalize(a, "/r/arm_A") == normalize(f, "/r/arm_F")

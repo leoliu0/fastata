@@ -38,6 +38,9 @@ WRAPPER_ID = "<wrapper log>"
 
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 _NORMS = [
+    # fastata's runtime directory on the ado-path (adopath listings), and the listing's numbers
+    (re.compile(r"^\s*\[\d+\]\s+\"[^\"\n]*/fastata/\"[ \t]*\n", re.M), ""),
+    (re.compile(r"^(\s*)\[\d+\](\s+(?:\([A-Z]+\))?\s*\")", re.M), r"\1[#]\2"),
     (re.compile(r"^Running .*profile\.do.*$", re.M), ""),
     (re.compile(r"^.*\br; t=.*$", re.M), "<RTIME>"),
     (re.compile(r"^\s*\d+:\s+[\d.]+\s*/\s+\d+\s*=\s+[\d.]+\s*$", re.M), "<TIMER>"),
@@ -118,6 +121,7 @@ def excel_text(p: Path) -> str:
 
 
 def kind_of(rel: str) -> str:
+    """text, dta, excel (cells; text when the file is not a workbook), skip or bytes."""
     if rel == WRAPPER_ID:
         return "text"
     suf = Path(rel).suffix.lower()
@@ -202,7 +206,11 @@ def compare_pairs(pkg: str, x: str, y: str, files: list[str]) -> dict[str, tuple
                     tx, ty = runner.log_region(tx) or "", runner.log_region(ty) or ""
                 out[rel] = cmp_text(tx, ty, rx, ry)
             elif k == "excel":
-                out[rel] = cmp_text(excel_text(px), excel_text(py), rx, ry)
+                try:
+                    tx, ty = excel_text(px), excel_text(py)
+                except Exception:  # noqa: BLE001 - outreg2 and others write text or XML as .xls
+                    tx, ty = px.read_text(errors="replace"), py.read_text(errors="replace")
+                out[rel] = cmp_text(tx, ty, rx, ry)
             else:
                 out[rel] = ("SAME", "") if px.read_bytes() == py.read_bytes() else ("DIFF", "bytes differ")
         except Exception as e:  # noqa: BLE001 - unreadable file

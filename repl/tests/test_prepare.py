@@ -26,3 +26,11 @@ def test_missing_dir(tmp_path):
     assert missing_dir(f"file {arm}/Data/x.dta could not be opened\nr(603);\n", arm, arm) is None
     assert missing_dir("file /elsewhere/x/y.dta could not be opened\nr(603);\n", arm, arm) is None
     assert missing_dir("file x.dta not found\nr(601);\n", arm, arm) is None
+
+
+def test_missing_ado_folder(tmp_path):
+    arm = tmp_path / "arm_A"
+    (arm / "code").mkdir(parents=True)
+    log = (f"    The folder path\n        [{arm}/code/\n        > ado] in\n"
+           f"        adopath({arm}/code/ado) does not exist.\nr(99);\n")
+    assert missing_dir(log, arm, arm) == "code/ado"

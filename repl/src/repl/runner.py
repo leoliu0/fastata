@@ -33,6 +33,7 @@ WRAPPER_LOG = "_fxrepl_wrapper.log"
 HOME = "_fxrepl_home"
 CALLS = "_fxrepl_calls.csv"
 PERSONAL = "_fxrepl_personal"
+PLUS = "_fxrepl_plus"
 TIMEOUT_MIN = {"A": 60, "B": 90, "F": 90}
 SORTSEED = 20261015
 PROCESSORS = 8
@@ -79,16 +80,16 @@ def manifest(root: Path) -> dict[str, list[int]]:
 
 
 def wrapper_text(pkg: str, arm: str, master: Path, cwd: Path | None = None) -> str:
-    """The do-file each arm runs: PLUS is the package's dependencies (read-only), PERSONAL a
-    writable directory of the arm (packages save schemes and settings there)."""
-    deps = deps_dir(pkg)
+    """The do-file each arm runs: PLUS is the arm's copy of the package's dependencies (packages
+    install their own bundled ado-files there), PERSONAL a writable directory of the arm."""
+    plus = arm_dir(pkg, arm) / PLUS
     personal = arm_dir(pkg, arm) / PERSONAL
     lines = [
         f"* fastata replication harness: arm {arm} of {pkg}",
         "clear all",
         "set more off",
         f"set processors {PROCESSORS}",
-        f"sysdir set PLUS {sq(str(deps / 'plus') + '/')}",
+        f"sysdir set PLUS {sq(str(plus) + '/')}",
         f"sysdir set PERSONAL {sq(str(personal) + '/')}",
         "mata: mata mlib index",
     ]
@@ -195,14 +196,14 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
     for d in meta.get("mkdirs", []):
         (root / d).mkdir(parents=True, exist_ok=True)
     (root / PERSONAL).mkdir()
+    deps = deps_dir(pkg)
+    (deps / "plus").mkdir(parents=True, exist_ok=True)
+    subprocess.run(["cp", "-a", str(deps / "plus"), str(root / PLUS)], check=True)
     pre = manifest(root)
     res = results_dir(pkg)
     (res / f"arm_{arm}_manifest.json").write_text(json.dumps({"files": pre, "patched": patched}))
     home = root / HOME
     home.mkdir()
-    deps = deps_dir(pkg)
-    for d in ("plus", "personal"):
-        (deps / d).mkdir(parents=True, exist_ok=True)
     ro = [paths.pkg_dir(pkg)]
     env: dict[str, str] = {}
     if arm == "F":
