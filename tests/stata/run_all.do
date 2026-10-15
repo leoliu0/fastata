@@ -7,7 +7,7 @@ version 16
 clear all
 set more off
 local here `c(pwd)'
-foreach t in test_framework test_fallback {
+foreach t in test_framework test_fallback test_dup {
 	di as text _n "{hline 78}" _n "running `t'.do" _n "{hline 78}"
 	quietly cd "`here'"
 	do `t'.do
