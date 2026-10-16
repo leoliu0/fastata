@@ -202,6 +202,41 @@ assert word("$TV_C_a", 1) != word("$TV_C_a", 2)
 assert "$TV_C_a" == "$TV_C_b"
 di as txt "verify hidden sort stream ok"
 
+* frame copy reverses the order of the value labels (label dir), which append and merge show in
+* their "label ... already defined" notes: verify mode keeps the order (dataverse-AOY4D6,
+* dataverse-A9ZFFF, zenodo-19562339)
+capture program drop tv_labs
+program tv_labs
+	args tag
+	global TV_L_`tag'
+	capture frame drop l`tag'
+	frame create l`tag'
+	frame l`tag' {
+		sysuse auto, clear
+		foreach l in zl al ml {
+			label define `l' 0 "`l'0" 1 "`l'1"
+		}
+		gen byte z = mod(_n, 2)
+		label values z zl
+		foreach c in "egen double m = mean(price), by(foreign)" "isid make" "xtile q = price, nq(4)" {
+			`c'
+			quietly label dir
+			global TV_L_`tag' ${TV_L_`tag'} | `r(names)'
+		}
+	}
+	frame drop l`tag'
+end
+quietly fastata off
+tv_labs a
+quietly fastata on
+_fx mode verify
+tv_labs b
+_fx mode auto
+di as txt "value labels without fastata: $TV_L_a"
+di as txt "value labels in verify mode:  $TV_L_b"
+assert "$TV_L_a" == "$TV_L_b"
+di as txt "verify value label order ok"
+
 * verify mode needs no data: a fast call on a frame other than default, and an error of the
 * fast path (isid) with the original's return code
 frame create other

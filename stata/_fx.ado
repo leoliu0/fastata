@@ -284,6 +284,7 @@ program VSnap
 		local why "snapshot r(`=_rc')"
 		capture frame drop __fx_vsnap
 	}
+	else quietly mata: _fx_vlorder("__fx_vsnap")
 	quietly mata: _fx_vset(st_local("why"), st_local("srs"), st_local("rs"))
 end
 
@@ -813,6 +814,33 @@ string rowvector _fx_vlabs()
 	l = tokens(st_global("r(names)"))
 	stata("_return restore __fx_vr")
 	return(l)
+}
+
+// Defines the value labels of frame snap again, oldest first, so that they come in the order of
+// the current frame: frame copy reverses that order, which later commands show (append's and
+// merge's "label ... already defined" notes follow it). A label with an empty text or no values
+// is left alone (st_vlmodify() would drop those values or not create it).
+void _fx_vlorder(string scalar snap)
+{
+	string rowvector l
+	string colvector txt
+	string scalar cur
+	real colvector vals
+	real scalar i
+
+	l = _fx_vlabs()
+	if (cols(l) < 2) return
+	cur = st_framecurrent()
+	st_framecurrent(snap)
+	if (_fx_vlabs() != l) {
+		for (i = cols(l); i >= 1; i--) {
+			st_vlload(l[i], vals, txt)
+			if (rows(vals) == 0 | anyof(txt, "")) continue
+			st_vldrop(l[i])
+			st_vlmodify(l[i], vals, txt)
+		}
+	}
+	st_framecurrent(cur)
 }
 
 // Compares the current frame (the fast path's result) with frame snap (the original's result):
