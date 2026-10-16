@@ -149,6 +149,15 @@ A {cmd:profile.do} in the directory where Stata starts takes precedence over the
 If you suspect {cmd:fastata} in a result, run the command again after {cmd:fastata off}.
 Please report any difference at {browse "https://github.com/leoliu0/fastata/issues"}.
 
+{pstd}
+To check {cmd:fastata} on your own code, set the environment variable {cmd:FASTATA_MODE} to
+{cmd:verify} before you start Stata. Every call that takes the fast path then also runs the
+original command, quietly, on a copy of the data made before the call, compares the two
+results and keeps the original's, so the whole run gives the original's results;
+{cmd:fastata status} shows how many calls agreed. If the environment variable
+{cmd:FASTATA_COUNTS} names a file, every call also appends a line to that file, and a call
+that disagrees records the first difference. Verify mode is slower than the original.
+
 
 {title:Author}
 
