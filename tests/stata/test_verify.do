@@ -276,7 +276,7 @@ assert `ok'
 mata: st_local("ok", strofreal(regexm(tv_counts[9], "^xtile,verify_skipped,snapshot r[(][0-9]+[)]$")))
 assert `ok'
 mata: tv_counts[9] = "skipped"
-mata: st_local("ok", strofreal(tv_counts == ("egen,fast," \ "egen,verify_ok," \ "xtile,fast," \ "xtile,verify_ok," \ "xtile,fast," \ "xtile,fast," \ "xtile,verify_mismatch,values of q3 (1 obs)" \ "xtile,fast," \ "skipped" \ "isid,fallback,mode original")))
+mata: st_local("ok", strofreal(tv_counts == ("egen,fast," \ "egen,verify_ok," \ "xtile,fast," \ "xtile,verify_ok," \ "xtile,fast," \ "xtile,fast," \ "xtile,verify_mismatch,values of q3 (1 obs; first obs 1: 2 vs 1)" \ "xtile,fast," \ "skipped" \ "isid,fallback,mode original")))
 assert `ok'
 erase `"`counts'"'
 erase verify_child.log
