@@ -827,8 +827,9 @@ string rowvector _fx_vlabs()
 
 // Defines the value labels of frame snap again, oldest first, so that they come in the order of
 // the current frame: frame copy reverses that order, which later commands show (append's and
-// merge's "label ... already defined" notes follow it). A label with an empty text or no values
-// is left alone (st_vlmodify() would drop those values or not create it).
+// merge's "label ... already defined" notes follow it). A label with an empty text, no values or
+// a value listed twice (files written by other software; dataverse-6KG67M) is left alone:
+// st_vlmodify() would drop those entries or not create the label.
 void _fx_vlorder(string scalar snap)
 {
 	string rowvector l
@@ -844,12 +845,27 @@ void _fx_vlorder(string scalar snap)
 	if (_fx_vlabs() != l) {
 		for (i = cols(l); i >= 1; i--) {
 			st_vlload(l[i], vals, txt)
-			if (rows(vals) == 0 | anyof(txt, "")) continue
+			if (rows(vals) == 0 | anyof(txt, "") | _fx_hasdup(vals)) continue
 			st_vldrop(l[i])
 			st_vlmodify(l[i], vals, txt)
 		}
 	}
 	st_framecurrent(cur)
+}
+
+// 1 if v holds a value more than once. (No sort: sorting can draw from the sort random-number
+// generator.)
+real scalar _fx_hasdup(real colvector v)
+{
+	transmorphic scalar a
+	real scalar i
+
+	a = asarray_create("real")
+	for (i = 1; i <= rows(v); i++) {
+		if (asarray_contains(a, v[i])) return(1)
+		asarray(a, v[i], 1)
+	}
+	return(0)
 }
 
 // Compares the current frame (the fast path's result) with frame snap (the original's result):

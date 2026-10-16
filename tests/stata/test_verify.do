@@ -237,6 +237,41 @@ di as txt "value labels in verify mode:  $TV_L_b"
 assert "$TV_L_a" == "$TV_L_b"
 di as txt "verify value label order ok"
 
+* a value label that lists one value twice (other software writes such files; label define
+* cannot): verify mode keeps every entry (dataverse-6KG67M). The file is saved with labels
+* dupl (0 "a", 1 "b") and other, then its second value is patched to 0.
+tempfile dupl
+frame create ld
+frame ld {
+	quietly set obs 4
+	gen byte r = mod(_n, 2)
+	gen byte o = 1
+	gen double x = _n
+	label define dupl 0 "a" 1 "b"
+	label define other 1 "x"
+	label values r dupl
+	* (save keeps only labels attached to a variable; verify reorders only with two or more)
+	label values o other
+	quietly save `"`dupl'"'
+	mata: f = st_local("dupl"); fh = fopen(f, "rw"); s = fread(fh, 10000000); ///
+		p = strpos(s, char(0) * 4 + char(1) + char(0) * 3 + "a" + char(0) + "b" + char(0)); ///
+		assert(p > 0); fseek(fh, p + 3, -1); fwrite(fh, char(0)); fclose(fh)
+	use `"`dupl'"', clear
+	mata: st_vlload("dupl", v = ., t = ""); assert(v == (0 \ 0)); assert(t == ("a" \ "b"))
+	quietly fastata on
+	_fx mode verify
+	_fx status
+	local vok0 `fx_vok_egen'
+	local vmis0 `fx_vmis_egen'
+	egen double m = mean(x)
+	_fx status
+	_fx mode auto
+	assert `fx_vok_egen' == `vok0' + 1 & `fx_vmis_egen' == `vmis0'
+	mata: st_vlload("dupl", v = ., t = ""); assert(v == (0 \ 0)); assert(t == ("a" \ "b"))
+}
+frame drop ld
+di as txt "verify duplicate-value label ok"
+
 * verify mode needs no data: a fast call on a frame other than default, and an error of the
 * fast path (isid) with the original's return code
 frame create other
