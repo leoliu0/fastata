@@ -258,9 +258,11 @@ assert _rc == 111
 local counts `"`c(pwd)'/tv_counts.csv"'
 capture erase `"`counts'"'
 capture erase verify_child.log
-local exe `"`c(sysdir_stata)'stata-mp"'
-capture confirm file `"`exe'"'
-if _rc local exe stata-mp
+* the stata-mp launcher on PATH (it may be a wrapper that sets up libraries), else the binary in
+* c(sysdir_stata)
+tempfile onpath
+shell command -v stata-mp > "`onpath'" 2>/dev/null
+mata: st_local("exe", fileexists(st_local("onpath")) && rows(cat(st_local("onpath"))) ? "stata-mp" : c("sysdir_stata") + "stata-mp")
 shell FASTATA_MODE=verify FASTATA_COUNTS="`counts'" "`exe'" -b do verify_child.do
 mata: st_local("done", strofreal(anyof(cat("verify_child.log"), "VERIFY_CHILD passed")))
 if !`done' {
