@@ -42,9 +42,6 @@ WRAPPER_ID = "<wrapper log>"
 
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 _NORMS = [
-    # fastata's runtime directory on the ado-path (adopath listings), and the listing's numbers
-    (re.compile(r"^\s*\[\d+\]\s+\"[^\"\n]*/fastata/\"[ \t]*\n", re.M), ""),
-    (re.compile(r"^(\s*)\[\d+\](\s+(?:\([A-Z]+\))?\s*\")", re.M), r"\1[#]\2"),
     (re.compile(r"^Running .*profile\.do.*$", re.M), ""),
     (re.compile(r"^.*\br; t=.*$", re.M), "<RTIME>"),
     (re.compile(r"^\s*\d+:\s+[\d.]+\s*/\s+\d+\s*=\s+[\d.]+\s*$", re.M), "<TIMER>"),
@@ -62,12 +59,46 @@ _NORMS = [
 NUM_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
-def normalize(text: str, run_root: str) -> str:
+# One entry of an ado-path listing (adopath, adopath +/-/++), in a text log or SMCL:
+#   "  [2]  (BASE)      "/s/ado/base/""  or  "{txt}  [2]  (BASE)      "{res}/s/ado/base/{txt}""
+_LISTING_RE = re.compile(r"^(\{txt\})?([ \t]*)\[(\d+)\]([ \t]+(?:\([A-Z]+\))?[ \t]*\"(?:\{res\})?)"
+                         r"([^\"\n]*?)((?:\{txt\})?\"[ \t]*)$")
+
+
+def drop_runtime_listing(text: str) -> str:
+    """fastata's documented footprint in a fastata arm: its runtime directory (<PLUS>fastata/)
+    first on the ado-path. Drops that entry from every ado-path listing and renumbers the
+    entries after it ([3] -> [2], ...), so the rest of the listing must match arm A's."""
+    out: list[str] = []
+    shift = 0
+    style = ""  # SMCL: the style tag of a dropped first entry moves to the next entry
+    for ln in text.split("\n"):
+        m = _LISTING_RE.match(ln)
+        if not m:
+            shift, style = 0, ""  # a listing is a run of consecutive entries
+            out.append(ln)
+            continue
+        if m.group(5).endswith("/fastata/"):
+            shift += 1
+            style = style or m.group(1) or ""
+            continue
+        if shift:
+            ln = (m.group(1) or style) + m.group(2) + f"[{int(m.group(3)) - shift}]" + ln[m.end(3) + 1:]
+            style = ""
+        out.append(ln)
+    return "\n".join(out)
+
+
+def normalize(text: str, run_root: str, fastata: bool = False) -> str:
+    """Text for comparison; fastata: the text comes from a fastata arm (V, F), whose documented
+    footprint is removed too."""
     text = text.replace("\r\n", "\n")
     text = re.sub(r"\n> ", "", text)  # Stata's continuation of long command lines
     if run_root:
         text = text.replace(run_root, "<RUN>")
-    text = re.sub(r"arm_[ABF]\b", "arm_X", text)
+    text = re.sub(r"arm_(?:A2|[ABFV])\b", "arm_X", text)
+    if fastata:
+        text = drop_runtime_listing(text)
     for pat, rep in _NORMS:
         text = pat.sub(rep, text)
     return text
@@ -77,8 +108,9 @@ def reldif(a: float, b: float) -> float:
     return abs(a - b) / (abs(b) + 1)
 
 
-def cmp_text(x: str, y: str, root_x: str, root_y: str) -> tuple[str, str]:
-    nx, ny = normalize(x, root_x), normalize(y, root_y)
+def cmp_text(x: str, y: str, root_x: str, root_y: str, fx_x: bool = False, fx_y: bool = False) -> tuple[str, str]:
+    """x against y; fx_x/fx_y: that side comes from a fastata arm."""
+    nx, ny = normalize(x, root_x, fx_x), normalize(y, root_y, fx_y)
     if nx == ny:
         return "SAME", ""
     px, py = NUM_RE.split(nx), NUM_RE.split(ny)
@@ -204,13 +236,13 @@ def compare_pairs(pkg: str, x: str, y: str, files: list[str]) -> dict[str, tuple
                 ty = py.read_text(errors="replace")
                 if rel == WRAPPER_ID:
                     tx, ty = runner.log_region(tx) or "", runner.log_region(ty) or ""
-                out[rel] = cmp_text(tx, ty, rx, ry)
+                out[rel] = cmp_text(tx, ty, rx, ry, x in runner.FASTATA_ARMS, y in runner.FASTATA_ARMS)
             elif k == "excel":
                 try:
                     tx, ty = excel_text(px), excel_text(py)
                 except Exception:  # noqa: BLE001 - outreg2 and others write text or XML as .xls
                     tx, ty = px.read_text(errors="replace"), py.read_text(errors="replace")
-                out[rel] = cmp_text(tx, ty, rx, ry)
+                out[rel] = cmp_text(tx, ty, rx, ry, x in runner.FASTATA_ARMS, y in runner.FASTATA_ARMS)
             else:
                 out[rel] = ("SAME", "") if px.read_bytes() == py.read_bytes() else ("DIFF", "bytes differ")
         except Exception as e:  # noqa: BLE001 - unreadable file
@@ -246,7 +278,7 @@ def three_way(rel: str, texts: dict[str, str], roots: dict[str, str], x: str = "
     the other units (numbers within tolerance pass only when tolerant). None when the units do
     not line up."""
     logish = rel == WRAPPER_ID or Path(rel).suffix.lower() in (".log", ".smcl")
-    u = {k: units(normalize(t, roots[k]), logish) for k, t in texts.items()}
+    u = {k: units(normalize(t, roots[k], k in runner.FASTATA_ARMS), logish) for k, t in texts.items()}
     if not (len(u["A"]) == len(u[x]) == len(u[ref])):
         return None
     ties = near = 0

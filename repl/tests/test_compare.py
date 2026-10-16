@@ -1,4 +1,4 @@
-from repl.compare import cmp_text, file_verdict, kind_of, normalize, WRAPPER_ID
+from repl.compare import cmp_text, file_verdict, kind_of, normalize, three_way, WRAPPER_ID
 from repl.runner import log_region, run_failure, wrapper_text, aggregate_calls
 
 
@@ -101,7 +101,47 @@ def test_three_way():
 
 
 def test_adopath_listing_normalised():
-    a = '  [1]  (BASE)      "/s/ado/base/"\n  [2]  (SITE)      "/s/site/"\n  [3]              "."\n'
-    f = ('  [1]              "/r/arm_F/_fxrepl_home/ado/plus/fastata/"\n'
+    """fastata's runtime directory is dropped from ado-path listings of fastata arms only, and
+    the entries after it are renumbered, so the rest must match arm A exactly."""
+    a = '. adopath\n  [1]  (BASE)      "/s/ado/base/"\n  [2]  (SITE)      "/s/site/"\n  [3]              "."\n'
+    f = ('. adopath\n  [1]              "/r/arm_V/_fxrepl_home/ado/plus/fastata/"\n'
          '  [2]  (BASE)      "/s/ado/base/"\n  [3]  (SITE)      "/s/site/"\n  [4]              "."\n')
-    assert normalize(a, "/r/arm_A") == normalize(f, "/r/arm_F")
+    assert normalize(f, "/r/arm_V", fastata=True) == normalize(a, "/r/arm_A")
+    assert cmp_text(a, f, "/r/arm_A", "/r/arm_V", False, True)[0] == "SAME"
+    # only in the fastata arm: arm A keeps such a line (and its numbering)
+    assert normalize(f, "/r/arm_A") != normalize(a, "/r/arm_A")
+    assert cmp_text(a, f, "/r/arm_A", "/r/arm_V")[0] == "DIFF"
+    # the rest of the listing still has to match
+    f2 = f.replace('"/s/site/"', '"/s/other/"')
+    assert cmp_text(a, f2, "/r/arm_A", "/r/arm_V", False, True)[0] == "DIFF"
+    f3 = f.replace("[4]", "[3]")  # numbering after the dropped entry is checked too
+    assert cmp_text(a, f3, "/r/arm_A", "/r/arm_V", False, True)[0] == "DIFF"
+
+
+def test_adopath_listing_wrapped_middle_and_repeated():
+    """Text logs wrap the long runtime path with "> "; after adopath ++ the runtime directory
+    is not first; a log can hold several listings."""
+    a = ('. adopath ++ PLUS\n  [1]  (PLUS)      "/r/arm_A/ado/"\n  [2]  (BASE)      "/b/"\n'
+         '  [3]              "."\n\n. adopath\n  [1]  (BASE)      "/b/"\n  [2]              "."\n')
+    f = ('. adopath ++ PLUS\n  [1]  (PLUS)      "/r/arm_F/ado/"\n  [2]              "/r/arm_F/_fxrepl_\n'
+         '> home/ado/plus/fastata/"\n  [3]  (BASE)      "/b/"\n  [4]              "."\n\n. adopath\n'
+         '  [1]              "/r/arm_F/_fxrepl_home/ado/plus/fastata/"\n  [2]  (BASE)      "/b/"\n'
+         '  [3]              "."\n')
+    assert normalize(f, "/r/arm_F", fastata=True) == normalize(a, "/r/arm_A")
+
+
+def test_adopath_listing_smcl():
+    """zenodo-19562339: an SMCL log (line 833 of master_replication_log.smcl)."""
+    a = ('{com}. adopath\n{txt}  [1]  (BASE)      "{res}/s/ado/base/{txt}"\n'
+         '{txt}  [2]  (SITE)      "{res}/s/site/{txt}"\n{txt}  [3]              "{res}.{txt}"\n')
+    # as Stata writes it: only the first entry carries {txt}
+    a = ('{com}. adopath\n{txt}  [1]  (BASE)      "{res}/s/ado/base/{txt}"\n'
+         '  [2]  (SITE)      "{res}/s/site/{txt}"\n  [3]              "{res}.{txt}"\n')
+    f = ('{com}. adopath\n{txt}  [1]              "{res}/r/arm_V/_fxrepl_home/ado/plus/fastata/{txt}"\n'
+         '  [2]  (BASE)      "{res}/s/ado/base/{txt}"\n  [3]  (SITE)      "{res}/s/site/{txt}"\n'
+         '  [4]              "{res}.{txt}"\n')
+    assert normalize(f, "/r/arm_V", fastata=True) == normalize(a, "/r/arm_A")
+    assert normalize(f.replace("[3]  (SITE)", "[3]  (PLUS)"), "/r/arm_V", fastata=True) != normalize(a, "/r/arm_A")
+    assert three_way("x.smcl", {"A": a, "A2": a, "V": f}, {"A": "/r/arm_A", "A2": "/r/arm_A2", "V": "/r/arm_V"},
+                     "V", "A2", "NONDET", False)[0] == "SAME"
+
