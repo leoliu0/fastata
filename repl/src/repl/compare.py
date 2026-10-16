@@ -89,16 +89,61 @@ def drop_runtime_listing(text: str) -> str:
     return "\n".join(out)
 
 
+# macro list output in a text log: "name:" padded to column 16, then the value (a name of 15+
+# characters ends its line). Stata wraps a long value onto lines indented 16 spaces: mid-word
+# after "> ", or at a space (which it drops) without it.
+_MACRO_ENTRY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]{0,31}:)(?:( +)\S|$)")
+_MACRO_CONT_RE = re.compile(r"^ {16}(> )?(\S.*)$")
+
+
+def join_macro_list(text: str) -> str:
+    """Joins each macro list entry with its continuation lines, so that values wrapped at
+    different points (paths of different lengths in different arms) compare."""
+    out: list[str] = []
+    entry = False
+    for ln in text.split("\n"):
+        m = _MACRO_CONT_RE.match(ln) if entry else None
+        if m:
+            sep = "" if m.group(1) or out[-1].endswith(":") else " "
+            out[-1] += sep + m.group(2)
+            continue
+        e = _MACRO_ENTRY_RE.match(ln)
+        entry = bool(e) and (len(e.group(1)) + len(e.group(2)) == 16 if e.group(2) else len(e.group(1)) >= 16)
+        out.append(ln)
+    return "\n".join(out)
+
+
+# An entry of an ado-path macro value (S_ADO): `"path"' or a bare word; fastata's runtime directory
+_RT_ENTRY = r"(?:`\"[^\"\n]*/fastata/\"'|[^\s;`\"{}]*/fastata/)"
+_SADO_LINE_RE = re.compile(r"^(?:\{txt\})?S_ADO:.*$", re.M)
+_ADOPATH_CRETURN_RE = re.compile(r"^(\s*c\(adopath\) = \").*(\")", re.M)  # to the line's last quote
+
+
+def drop_runtime_sado(text: str) -> str:
+    """fastata's footprint in macro list output of S_ADO (the ado-path as a macro): drops the
+    runtime directory's entry and its separator."""
+
+    def one(m: re.Match) -> str:
+        ln = re.sub(r"(?<=[\s;}])" + _RT_ENTRY + ";", "", m.group(0))
+        return re.sub(";" + _RT_ENTRY + r"(?=\s*$|\{)", "", ln)
+
+    return _SADO_LINE_RE.sub(one, text)
+
+
 def normalize(text: str, run_root: str, fastata: bool = False) -> str:
     """Text for comparison; fastata: the text comes from a fastata arm (V, F), whose documented
     footprint is removed too."""
     text = text.replace("\r\n", "\n")
     text = re.sub(r"\n> ", "", text)  # Stata's continuation of long command lines
+    text = join_macro_list(text)
     if run_root:
         text = text.replace(run_root, "<RUN>")
     text = re.sub(r"arm_(?:A2|[ABFV])\b", "arm_X", text)
+    # creturn list shows c(adopath) cut to a few characters, fastata's directory included: masked
+    text = _ADOPATH_CRETURN_RE.sub(r"\1<ADOPATH>\2", text)
     if fastata:
         text = drop_runtime_listing(text)
+        text = drop_runtime_sado(text)
     for pat, rep in _NORMS:
         text = pat.sub(rep, text)
     return text

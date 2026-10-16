@@ -145,3 +145,60 @@ def test_adopath_listing_smcl():
     assert three_way("x.smcl", {"A": a, "A2": a, "V": f}, {"A": "/r/arm_A", "A2": "/r/arm_A2", "V": "/r/arm_V"},
                      "V", "A2", "NONDET", False)[0] == "SAME"
 
+
+
+# macro list output from dataverse-6KG67M (arms A and V; Stata wraps the value at column 80)
+SADO_A = (
+    "eststo:         est1\n"
+    "S_ADO:          `\"PLUS\"';`\"BASE\"';`\"SITE\"';`\".\"';`\"/home/leo/fastata-repl/pkgs/\n"
+    "                > dataverse-6KG67M/arm_A/_fxrepl_plus/\"'\n"
+    "adodir:         /home/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_A/ado\n")
+SADO_V = (
+    "eststo:         est1\n"
+    "S_ADO:          `\"PLUS\"';`\"/home/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_V/_\n"
+    "                > fxrepl_home/ado/plus/fastata/\"';`\"BASE\"';`\"SITE\"';`\".\"';`\"/ho\n"
+    "                > me/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_V/_fxrepl_plus/\n"
+    "                > \"'\n"
+    "adodir:         /home/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_V/ado\n")
+RA, RV = "/home/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_A", "/home/leo/fastata-repl/pkgs/dataverse-6KG67M/arm_V"
+
+
+def test_macro_list_joined_in_all_arms():
+    """Continuation lines of a macro list value are joined (mid-word after "> ", at a dropped
+    space without it), so values wrapped at different points compare; entries stay apart."""
+    a = "zz:             a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd\n                ee ff\n" \
+        "verylongmacronamehere:\n                short\nS_ADO:          x;`\"/r/arm_A/lo\n                > ng/\"'\n"
+    b = "zz:             a b c d e f g h i j k l m n o p q r s t u v w x y z aa bb cc dd ee\n                ff\n" \
+        "verylongmacronamehere:\n                short\nS_ADO:          x;`\"/r/arm_A2/l\n                > ong/\"'\n"
+    assert normalize(a, "/r/arm_A") == normalize(b, "/r/arm_A2")
+    assert "dd ee ff" in normalize(a, "/r/arm_A") and "verylongmacronamehere:short" in normalize(a, "")
+    assert cmp_text(a, b.replace("ff", "gg"), "/r/arm_A", "/r/arm_A2")[0] == "DIFF"
+    # indented lines that do not follow a macro entry are left alone
+    t = "Variable:  x\n                > y\n"
+    assert normalize(t, "") == t
+
+
+def test_sado_runtime_entry_dropped():
+    assert normalize(SADO_V, RV, fastata=True) == normalize(SADO_A, RA)
+    assert cmp_text(SADO_A, SADO_V, RA, RV, False, True)[0] == "SAME"
+    assert cmp_text(SADO_A, SADO_V, RA, RV)[0] == "DIFF"  # only fastata arms lose the entry
+    # the rest of the value still has to match
+    assert cmp_text(SADO_A, SADO_V.replace('`"SITE"\';', ""), RA, RV, False, True)[0] == "DIFF"
+    # first and last entry, bare form, and the SMCL layout (one line)
+    for a, f in [("S_ADO:          BASE;SITE;.\n", "S_ADO:          /r/arm_V/_fxrepl_home/ado/plus/fastata/;BASE;SITE;.\n"),
+                 ("S_ADO:          BASE;SITE\n", "S_ADO:          BASE;SITE;`\"/r/arm_V/_fxrepl_home/ado/plus/fastata/\"'\n"),
+                 ("S_ADO:{space 10}{res}{res}`\"PLUS\"';`\"BASE\"'\n{p_end}\n",
+                  "S_ADO:{space 10}{res}{res}`\"PLUS\"';`\"/r/arm_V/_fxrepl_home/ado/plus/fastata/\"';`\"BASE\"'\n{p_end}\n"),
+                 ("S_ADO:{space 10}{res}{res}`\"BASE\"'\n{p_end}\n",
+                  "S_ADO:{space 10}{res}{res}`\"/r/arm_V/_fxrepl_home/ado/plus/fastata/\"';`\"BASE\"'\n{p_end}\n")]:
+        assert normalize(f, "/r/arm_V", fastata=True) == normalize(a, "/r/arm_A"), f
+
+
+def test_creturn_adopath_masked():
+    """creturn list cuts c(adopath) to a few characters (fastata's directory can be in them)."""
+    a = '             c(adopath) = "BASE;SITE;.;P.."      (adopath)\n                 c(pwd) = "/r/arm_A"                (cd)\n'
+    f = '             c(adopath) = "`"/r/arm_V/_fx.."      (adopath)\n                 c(pwd) = "/r/arm_V"                (cd)\n'
+    assert cmp_text(a, f, "/r/arm_A", "/r/arm_V", False, True)[0] == "SAME"
+    s = '             c(adopath) = "{res}PLUS"\';`"/home/le..{txt}"{col 54}({help adopath})\n'
+    assert "<ADOPATH>" in normalize(s, "") and "/home/le" not in normalize(s, "")
+    assert cmp_text(a, f.replace("(cd)", "(xx)"), "/r/arm_A", "/r/arm_V", False, True)[0] == "DIFF"
