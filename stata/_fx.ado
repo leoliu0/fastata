@@ -107,9 +107,13 @@ program _fx
 		}
 		else {
 			* the original from the random-number states at the start of the call, so that it
-			* leaves them as a run without fastata would; nothing below draws from them
-			set rngstate `fx_vrs'
-			set sortrngstate `fx_vsrs'
+			* leaves them as a run without fastata would; nothing below draws from them. The fast
+			* paths draw from neither, so the states are set back only if one changed: setting
+			* the sort state (even to its current value) also restarts a stream that c(sortrngstate)
+			* does not show (collapse breaks ties from it), which a run without fastata would
+			* continue
+			if c(rngstate) != `"`fx_vrs'"' set rngstate `fx_vrs'
+			if c(sortrngstate) != `"`fx_vsrs'"' set sortrngstate `fx_vsrs'
 			local fx_oleft
 			quietly mata: _fx_vinset(1)
 			frame `fx_vframe' {

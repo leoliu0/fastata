@@ -5,7 +5,9 @@
 *       x[1] within by-groups, runiform()), printing the sort and regular random-number states
 *       after each call, gives the same data, text log, SMCL log and final random-number states
 *       with fastata off and with fastata on in verify mode (and, in auto mode, a different sort
-*       random-number state: the sequence does depend on the original's internal sorts);
+*       random-number state: the sequence does depend on the original's internal sorts), and
+*       collapses between verified calls sum in the same order as without fastata (collapse
+*       breaks ties from a sort stream that c(sortrngstate) does not show);
 * (ii)  in a separate Stata process (verify_child.do) with FASTATA_MODE=verify and FASTATA_COUNTS
 *       set: the mode survives clear all, _fx mode auto overrides the env var, and a fast path
 *       broken on purpose (a copy of _fx_xtile that changes one value) is reported as
@@ -152,6 +154,53 @@ assert `"$TV_RS_a"' == `"$TV_RS_b"'
 tv_run c
 assert `"$TV_SRS_a"' != `"$TV_SRS_c"'
 di as txt "verify sequence ok"
+
+* collapse breaks sort ties from a stream that c(sortrngstate) does not show: it continues from
+* one collapse to the next, and set sortseed or set sortrngstate (even to the current value)
+* restarts it. Verify mode must leave it alone (zenodo-23223970: collapse (sum) after verified
+* calls summed in another order than without fastata). Each collapse sums 10,000 observations
+* per group, so another tie order changes the sums' last bits.
+capture program drop tv_coll
+program tv_coll
+	args tag
+	capture frame drop hc
+	frame copy vbase hc
+	frame hc {
+		collapse (sum) x1 x2, by(gbig)
+		quietly mata: st_local("h", strofreal(hash1(invtokens(strofreal(vec(st_data(., .))', "%21x"))), "%12.0f"))
+	}
+	frame drop hc
+	global TV_C_`tag' ${TV_C_`tag'} `h'
+end
+capture program drop tv_hidden
+program tv_hidden
+	args tag
+	global TV_C_`tag'
+	capture frame drop h`tag'
+	frame copy vbase h`tag'
+	frame h`tag' {
+		set sortseed 11
+		tv_coll `tag'
+		egen double m = mean(x1), by(g)
+		tv_coll `tag'
+		isid id
+		tv_coll `tag'
+		xtile q = x2, nq(5)
+		tv_coll `tag'
+	}
+end
+quietly fastata off
+tv_hidden a
+quietly fastata on
+_fx mode verify
+tv_hidden b
+_fx mode auto
+di as txt "collapse sums without fastata: $TV_C_a"
+di as txt "collapse sums in verify mode:  $TV_C_b"
+* the stream matters: consecutive collapses of the same data differ
+assert word("$TV_C_a", 1) != word("$TV_C_a", 2)
+assert "$TV_C_a" == "$TV_C_b"
+di as txt "verify hidden sort stream ok"
 
 * verify mode needs no data: a fast call on a frame other than default, and an error of the
 * fast path (isid) with the original's return code
