@@ -162,6 +162,29 @@ fq "pctile p = x1 [fw=w], nq(4)" pctile fallback
 fq "pctile p = x1, nq(2.5)" pctile fallback
 fq "pctile x2 = x1, nq(4)" pctile fallback
 fq "pctile str5 p = x1, nq(4)" pctile fallback
+frame copy base bnan
+frame bnan {
+	* NaN bit patterns (a plugin or Mata's st_store() can leave one in a variable): xn (x1), wn and fwn (weights)
+	quietly gen double xn = x1
+	quietly gen double wn = u + .2
+	quietly gen double fwn = fw
+	mata: _tn_b = bufio(); bufbyteorder(_tn_b, 1)
+	mata: _tn_nan = bufget(_tn_b, char((255, 254, 83, 248, 0, 0, 0, 0)), 0, "%8z", 1)
+	mata: st_store((3 \ 25000), "xn", J(2, 1, _tn_nan)); st_store(17, "wn", _tn_nan); st_store(9000, "fwn", _tn_nan)
+}
+* ---------------------------------------------------------------- NaN values
+* a NaN in x or in the weight runs the original (marksample takes it for missing, the kernels
+* for a number); in an expression it becomes . and stays fast; elsewhere it changes nothing
+fq "xtile q = xn, nq(4)" xtile fallback bnan
+fq "xtile q = x1 [aw=wn], nq(4)" xtile fallback bnan
+fq "xtile q = x2 [fw=fwn], nq(3)" xtile fallback bnan
+fq "pctile p = xn, nq(5)" pctile fallback bnan
+fq "pctile double p = x1 [pw=wn], nq(4)" pctile fallback bnan
+fq "xtile q = xn + 0, nq(4)" xtile fast bnan
+fq "pctile p = xn * 1, nq(4)" pctile fast bnan
+fq "xtile q = x1, nq(10)" xtile fast bnan
+fq "pctile p = x2 [aw=u], nq(4)" pctile fast bnan
+
 
 * c(type) double: pctile's default type follows it
 set type double

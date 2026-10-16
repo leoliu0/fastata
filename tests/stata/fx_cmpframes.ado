@@ -6,7 +6,8 @@
 *! - same characteristics (notes included) of _dta and of every variable, and the same value-label
 *!   definitions;
 *! - values: identical missing patterns and missing codes, identical strings, and reldif <= tol
-*!   on nonmissing numbers. tol 0 demands bitwise-equal values.
+*!   on nonmissing numbers. tol 0 demands bitwise-equal values. NaNs (a plugin or Mata can
+*!   store one) must have the same bits.
 program fx_cmpframes
 	version 16
 	syntax namelist(min=2 max=2), tol(real) [what(string) noSORTcheck noORDERcheck]
@@ -117,7 +118,7 @@ void fx_cmpvals(string scalar fa, string scalar fb, string scalar v, real scalar
 {
 	string scalar cur
 	string colvector sa, sb
-	real colvector a, b, ma, mb, d
+	real colvector a, b, ma, mb, d, na, nb
 	real scalar str, bad
 
 	cur = st_framecurrent()
@@ -135,6 +136,19 @@ void fx_cmpvals(string scalar fa, string scalar fb, string scalar v, real scalar
 			exit(9)
 		}
 		return
+	}
+	// a NaN (a plugin or Mata's st_store() can store one; NaN != NaN) compares by its bits
+	na = selectindex(a :!= a)
+	nb = selectindex(b :!= b)
+	if (length(na) | length(nb)) {
+		bad = length(na) != length(nb)
+		if (!bad) bad = na != nb | any(strofreal(a[na], "%21x") :!= strofreal(b[nb], "%21x"))
+		if (bad) {
+			errprintf("%s: %s: NaN values differ\n", what, v)
+			exit(9)
+		}
+		a[na] = J(length(na), 1, 0)
+		b[nb] = J(length(nb), 1, 0)
 	}
 	ma = a :>= .
 	mb = b :>= .

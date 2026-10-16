@@ -328,5 +328,24 @@ ts "tostring xb xi, gen(a)" fallback tostring
 ts "tostring xb xb, replace" fallback tostring
 ts "tostring nosuch, replace" fallback tostring
 ts "tostring a, replace" fallback tostring empty
+frame copy base bnan
+frame bnan {
+	* NaN bit patterns (a plugin or Mata's st_store() can leave one in a variable): zn (xi as double)
+	quietly gen double zn = xi
+	mata: _tn_b = bufio(); bufbyteorder(_tn_b, 1)
+	mata: _tn_nan = bufget(_tn_b, char((255, 254, 83, 248, 0, 0, 0, 0)), 0, "%8z", 1)
+	mata: st_store((5 \ 20000), "zn", J(2, 1, _tn_nan))
+}
+* ---------------------------------------------------------------- NaN values
+* a NaN in a source variable runs the original (string() shows it as "-"), with reason
+* NaN value; a NaN in another variable changes nothing
+ts "tostring zn, replace" fallback tostring bnan
+ts "tostring zn xb, gen(z1 z2)" fallback tostring bnan
+_fx status
+assert `"`fx_last_tostring'"' == "NaN value"
+ts "tostring xb, replace" fast tostring bnan
+ts "destring sa, replace" fast destring bnan
+ts "destring sa zn, replace" fast destring bnan
+
 
 di as result "TEST_STRNUM passed $TS_N specs"

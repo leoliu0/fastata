@@ -250,5 +250,22 @@ ff "duplicates examples k" duplicates fast small
 ff "duplicates list k t" duplicates fast small
 ff "duplicates tag k, gen(dt)" duplicates fast small
 ff "duplicates drop k, force" duplicates fast small
+frame copy base bnan
+frame bnan {
+	* NaN bit patterns (a plugin or Mata's st_store() can leave one in a variable): xn (x1)
+	quietly gen double xn = x1
+	mata: _tn_b = bufio(); bufbyteorder(_tn_b, 1)
+	mata: _tn_nan = bufget(_tn_b, char((255, 254, 83, 248, 0, 0, 0, 0)), 0, "%8z", 1)
+	mata: st_store((3 \ 25000), "xn", J(2, 1, _tn_nan))
+}
+* ---------------------------------------------------------------- NaN values
+* a NaN in a key runs the original, whose sort then never returns (src/dup.rs tests; not run
+* here); a NaN in a variable the call does not read changes nothing
+ff "isid id" isid fast bnan
+ff "isid g id, missok" isid fast bnan
+ff "duplicates report g" duplicates fast bnan
+ff "duplicates tag g s, gen(dt)" duplicates fast bnan
+ff "duplicates drop g gbig, force" duplicates fast bnan
+
 
 di as result "TEST_DUP passed $FD_N specs"

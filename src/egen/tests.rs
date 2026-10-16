@@ -382,7 +382,7 @@ fn std_and_extremes_with_missing_option() {
 
 #[test]
 fn a_nan_in_a_key_or_a_value_falls_back() {
-    let nan = f64::from_bits(0xfffe_53f8_0000_0000);
+    let nan = crate::testutil::stata_nan();
     let mut io = MemIo::new(N);
     let mut g: Vec<f64> = (0..N).map(|i| (i % 5) as f64).collect();
     let mut x: Vec<f64> = (0..N).map(|i| i as f64).collect();

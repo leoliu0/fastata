@@ -179,6 +179,10 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
     }
     let vars: Vec<i32> = (1..=nv as i32).collect();
     let cols = read_cols(io, &vars, threads)?;
+    // A NaN in x or the weight: marksample takes it for missing, the kernels for a number.
+    for c in &cols[..1 + hasw as usize] {
+        crate::nan::check(c)?;
+    }
     let x = &cols[0];
     let w = hasw.then(|| &cols[1]);
     let t = spec.touse.then(|| &cols[nv - 1]);
@@ -572,5 +576,27 @@ mod tests {
         }
         assert_eq!(key(-0.0), NEG_ZERO);
         assert_eq!(key(0.0), POS_ZERO);
+    }
+
+    #[test]
+    fn a_nan_in_x_or_the_weight_falls_back() {
+        let nan = crate::testutil::stata_nan();
+        let n = 5000;
+        for (wtype, at_w) in [(Wtype::None, false), (Wtype::Aw, false), (Wtype::Aw, true), (Wtype::Fw, true)] {
+            let mut x: Vec<f64> = (0..n).map(|i| (i % 97) as f64).collect();
+            let mut w: Vec<f64> = (0..n).map(|i| (1 + i % 3) as f64).collect();
+            if at_w { w[4000] = nan } else { x[17] = nan }
+            let mut io = MemIo::new(n);
+            let cx = io.add_num(&x);
+            io.push_var(cx);
+            if wtype != Wtype::None {
+                let cw = io.add_num(&w);
+                io.push_var(cw);
+            }
+            for kind in [Kind::Xtile, Kind::Pctile] {
+                let e = compute(&io, &spec(kind, 4, wtype, false, false), 3).err().expect("falls back");
+                assert!(e.is_fallback() && e.msg == crate::nan::REASON, "{wtype:?} {at_w}");
+            }
+        }
     }
 }

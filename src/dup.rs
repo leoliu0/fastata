@@ -110,6 +110,10 @@ impl Keys {
             }
         }
         let mut num = cache::read_cols(io, &numv, threads)?;
+        // A NaN key: Stata's sort (which isid and duplicates run) never returns.
+        for c in &num {
+            crate::nan::check(c)?;
+        }
         for x in num.iter_mut().flatten() {
             if *x == 0.0 {
                 *x = 0.0;
@@ -749,5 +753,31 @@ mod tests {
         io.push_var(a);
         io.push_var(t);
         assert_eq!(dup_compute(&io, Sub::Tag, true, 2).unwrap(), DupResult::default());
+    }
+
+    #[test]
+    fn a_nan_key_falls_back_and_a_nan_elsewhere_does_not_matter() {
+        // Stata's sort never returns on a NaN key (isid and duplicates sort), so these run the
+        // original; the key check reads only the keys.
+        let nan = crate::testutil::stata_nan();
+        let mut io = MemIo::new(9000);
+        let mut a: Vec<f64> = (0..9000).map(|i| (i % 7) as f64).collect();
+        a[8500] = nan;
+        let b: Vec<f64> = (0..9000).map(f64::from).collect();
+        let cn = io.add_num(&a);
+        let cb = io.add_num(&b);
+        io.push_var(cn);
+        io.push_var(cb);
+        for threads in [1, 4] {
+            let e = isid_counts(&io, true, threads).unwrap_err();
+            assert!(e.is_fallback() && e.msg == crate::nan::REASON);
+            for sub in [Sub::Report, Sub::Tag, Sub::Drop] {
+                let e = dup_compute(&io, sub, false, threads).unwrap_err();
+                assert!(e.is_fallback() && e.msg == crate::nan::REASON);
+            }
+        }
+        // the same data with only b as the key
+        io.varlist = vec![cb];
+        assert_eq!(isid_counts(&io, false, 4).unwrap(), (0, Some(9000)));
     }
 }

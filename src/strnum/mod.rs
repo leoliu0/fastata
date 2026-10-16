@@ -266,6 +266,8 @@ pub fn tostring_compute<I: Io>(io: &I, fmt: Fmt, threads: usize) -> Res<(Output,
             return Err(Error::syntax("fastata plugin: tostring expects numeric variables"));
         }
         let col = cache::read_cols(io, &[var], threads)?.pop().unwrap_or_default();
+        // string() shows a NaN as "-"; the integer formatter would reject it as non-integer
+        crate::nan::check(&col)?;
         let parts = for_blocks(io, nb, threads, StoreMode::Serial, |b, _emit| {
             let first = b * BLOCK;
             let m = BLOCK.min(n - first);
@@ -470,5 +472,15 @@ mod tests {
         let c = io.add_num(&[1.0, 1.5]);
         io.push_var(c);
         assert!(tostring_compute(&io, Fmt::G(12), 2).unwrap_err().is_fallback());
+    }
+
+    #[test]
+    fn tostring_falls_back_on_a_nan() {
+        // string() shows a NaN as "-"
+        let mut io = MemIo::new(3);
+        let c = io.add_num(&[1.0, crate::testutil::stata_nan(), MISS]);
+        io.push_var(c);
+        let e = tostring_compute(&io, Fmt::G(12), 1).unwrap_err();
+        assert!(e.is_fallback() && e.msg == crate::nan::REASON);
     }
 }
