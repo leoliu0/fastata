@@ -48,6 +48,7 @@ pub fn compute<I: Io>(io: &I, s: &Spec) -> Res<Computed> {
         return Err(Error::fallback("no observations"));
     }
     let miss = io.missval();
+    nan_free(io, &s.keys, s.threads)?;
     let touse = read_touse(io, s.touse, s.threads)?;
     let mut nn = None;
     let out = if s.fcn.is_keyed() {
@@ -61,6 +62,32 @@ pub fn compute<I: Io>(io: &I, s: &Spec) -> Res<Computed> {
     };
     let nmiss = out.iter().filter(|&&v| v >= miss).count();
     Ok(Computed { out, nmiss, n: nn })
+}
+
+/// A NaN bit pattern in a numeric variable (Stata never makes one, but plugins and Mata's
+/// `st_store()` can store one): Stata's expressions take it for a missing value, which no
+/// missing-code rule of the kernels reproduces (`.`-`.z` are `>= missval`, NaN compares false),
+/// and the original's sorts place it unpredictably. Such input runs the original.
+fn nan_fallback() -> Error {
+    Error::fallback("NaN value")
+}
+
+/// Fails with [`nan_fallback`] when a numeric variable of `vars` holds a NaN in any observation.
+fn nan_free<I: Io>(io: &I, vars: &[i32], threads: usize) -> Res<()> {
+    let num: Vec<i32> = vars.iter().copied().filter(|&v| !io.is_str(v)).collect();
+    let n = io.nobs();
+    if num.is_empty() || n == 0 {
+        return Ok(());
+    }
+    let k = num.len();
+    let bad = for_blocks(io, n.div_ceil(ROW_BLOCK), threads, StoreMode::Parallel, |b, _emit| {
+        let first = b * ROW_BLOCK;
+        let m = ROW_BLOCK.min(n - first);
+        let mut raw = vec_filled(m * k, 0.0)?;
+        io.read_block(&num, Rows::Range { first, n: m }, &mut raw)?;
+        Ok(raw.iter().any(|v| v.is_nan()))
+    })?;
+    if bad.into_iter().any(|b| b) { Err(nan_fallback()) } else { Ok(()) }
 }
 
 /// `group()` and `tag()`: groups of the sample by the varlist; without `missing`, groups with a
@@ -117,6 +144,9 @@ fn expr_values<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>>
         return Ok(x);
     }
     let mut x = read_cols(io, &[v], s.threads)?.pop().unwrap_or_default();
+    if x.iter().any(|v| v.is_nan()) {
+        return Err(nan_fallback());
+    }
     if s.cntflag {
         for xo in &mut x {
             *xo = if *xo != 0.0 && *xo < miss { 0.0 } else { miss };
@@ -244,6 +274,9 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
         let mut raw = vec_filled(m * nn, 0.0)?;
         if nn > 0 {
             io.read_block(&numv, Rows::Range { first, n: m }, &mut raw)?;
+            if raw.iter().any(|v| v.is_nan()) {
+                return Err(nan_fallback());
+            }
         }
         let mut res = vec_filled(m, miss)?;
         let mut v = vec![0.0; k];

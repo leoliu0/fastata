@@ -139,7 +139,16 @@ program _fx
 			frame change `cur'
 			frame drop __fx_vold
 			if `"`fx_vdiff'"' == "" _fx count `cmd' verify_ok
-			else _fx count `cmd' verify_mismatch `"`fx_vdiff'"'
+			else {
+				* egen: the function first, then the call (its start), so a line identifies the case
+				if "`cmd'" == "egen" {
+					local fx_vfcn
+					if ustrregexm(`"`cargs'"', "=\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(") local fx_vfcn = ustrregexs(1) + "(): "
+					local fx_vdiff `"`fx_vfcn'`fx_vdiff' | `=usubstr(strtrim(`"`cargs'"'), 1, 70)'"'
+				}
+				quietly mata: st_local("fx_vdiff", _fx_vclean(st_local("fx_vdiff")))
+				_fx count `cmd' verify_mismatch `"`fx_vdiff'"'
+			}
 		}
 		c_local fx_vrc `orc'
 		* c(rc) as the original left it
@@ -853,7 +862,7 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 	string scalar cur, d
 	string colvector sa, sb
 	string rowvector rs
-	real colvector a, b, ma, mb, z, nm
+	real colvector a, b, ma, mb, z, nm, na, nb
 	real matrix rv
 	real scalar j, k, str
 
@@ -887,11 +896,30 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 			if (str) sb = st_sdata(., j)
 			else b = st_data(., j)
 			st_framecurrent(cur)
+			// NaN (a plugin or Mata's st_store() can store one; NaN != NaN) compares by its bits;
+			// equal NaNs then count as equal values below
+			if (!str) {
+				na = selectindex(a :!= a)
+				nb = selectindex(b :!= b)
+				if (length(na) | length(nb)) {
+					if (length(na) != length(nb)) d = "NaN values of " + st_varname(j)
+					else if (na != nb | any(strofreal(a[na], "%21x") :!= strofreal(b[nb], "%21x"))) {
+						d = "NaN values of " + st_varname(j)
+					}
+					else {
+						a[na] = J(length(na), 1, 0)
+						b[nb] = J(length(nb), 1, 0)
+					}
+				}
+				if (d != "") break
+			}
 			if (str) {
-				if (sa != sb) d = "strings of " + st_varname(j) + " (" + strofreal(sum(sa :!= sb), "%20.0f") + " obs)"
+				if (sa != sb) d = "strings of " + st_varname(j) + " (" + strofreal(sum(sa :!= sb), "%20.0f") + " obs; first " +
+					_fx_vfirst(sa :!= sb) + ")"
 			}
 			else if (tol == 0) {
-				if (a != b) d = "values of " + st_varname(j) + " (" + strofreal(sum(a :!= b), "%20.0f") + " obs)"
+				if (a != b) d = "values of " + st_varname(j) + " (" + strofreal(sum(a :!= b), "%20.0f") + " obs; first " +
+					_fx_vfirst(a :!= b, a, b) + ")"
 				else {
 					z = selectindex(a :== 0)
 					if (length(z)) {
@@ -912,7 +940,8 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 						if (length(nm)) {
 							if (max(reldif(a[nm], b[nm])) > tol) {
 								d = ("values of " + st_varname(j) + " beyond the tolerance (max reldif "
-									+ strofreal(max(reldif(a[nm], b[nm])), "%9.2e") + ")")
+									+ strofreal(max(reldif(a[nm], b[nm])), "%9.2e") + "; first "
+									+ _fx_vfirst(reldif(a, b) :> tol :& !ma, a, b) + ")")
 							}
 						}
 					}
@@ -922,6 +951,26 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 		}
 	}
 	st_local("fx_vdiff", _fx_vclean(d))
+}
+
+// "obs <i>" of the first observation flagged in diff, and for numbers "<fast> vs <original>"
+// (%24.0g, or %21x when that does not show the difference).
+string scalar _fx_vfirst(real colvector diff, | real colvector a, real colvector b)
+{
+	real colvector ix
+	real scalar i
+	string scalar fa, fb
+
+	ix = selectindex(diff)
+	i = ix[1]
+	if (args() < 3) return("obs " + strofreal(i, "%20.0f"))
+	fa = strofreal(a[i], "%24.0g")
+	fb = strofreal(b[i], "%24.0g")
+	if (fa == fb) {
+		fa = strofreal(a[i], "%21x")
+		fb = strofreal(b[i], "%21x")
+	}
+	return("obs " + strofreal(i, "%20.0f") + ": " + strtrim(fa) + " vs " + strtrim(fb))
 }
 
 // ---------------------------------------------------------------------------- counters

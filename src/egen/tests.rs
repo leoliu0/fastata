@@ -379,3 +379,26 @@ fn std_and_extremes_with_missing_option() {
         }
     }
 }
+
+#[test]
+fn a_nan_in_a_key_or_a_value_falls_back() {
+    let nan = f64::from_bits(0xfffe_53f8_0000_0000);
+    let mut io = MemIo::new(N);
+    let mut g: Vec<f64> = (0..N).map(|i| (i % 5) as f64).collect();
+    let mut x: Vec<f64> = (0..N).map(|i| i as f64).collect();
+    x[N - 3] = nan;
+    let cg = io.add_num(&g);
+    let cx = io.add_num(&x);
+    g[17] = nan;
+    let cg2 = io.add_num(&g);
+    let (pg, px, pg2) = (io.push_var(cg), io.push_var(cx), io.push_var(cg2));
+    let is_nan_fb = |r: Res<Computed>| r.err().is_some_and(|e| e.is_fallback() && e.msg == "NaN value");
+    assert!(is_nan_fb(compute(&io, &spec(Fcn::Mean, Ty::Double, vec![pg], vec![px], None))));
+    assert!(is_nan_fb(compute(&io, &spec(Fcn::RowTotal, Ty::Double, vec![], vec![pg, px], None))));
+    assert!(is_nan_fb(compute(&io, &spec(Fcn::Group, Ty::Double, vec![pg2], vec![], None))));
+    let mut sp = spec(Fcn::Count, Ty::Double, vec![pg2], vec![pg], None);
+    sp.sorted = true;
+    assert!(is_nan_fb(compute(&io, &sp)));
+    // A NaN in a variable the call does not use changes nothing.
+    compute(&io, &spec(Fcn::Tag, Ty::Byte, vec![pg], vec![], None)).unwrap();
+}

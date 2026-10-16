@@ -286,6 +286,100 @@ te "egen v = mean(_pi * `a')" fallback bt
 te "egen v = mean(x1) if _b[x1] > 0" fallback bt
 te "egen v = mean(`a') if _N > 5" fallback bt
 
+* ---- NaN bit patterns (a plugin or Mata's st_store() can leave one in a variable; seen in
+* dataverse-A9ZFFF, where pdslasso's lassoutils.ado runs egen group() on data holding one). A NaN
+* in a variable the call does not read changes nothing: the fast path runs, and verify mode finds
+* its result equal to the original's. A NaN in a key or a value runs the original (Stata takes
+* it for a missing value). fx_both cannot compare such data (NaN != NaN), so tn compares every
+* variable by its bits.
+frame copy base bn
+frame bn {
+	* zn: all 1 but one NaN; zu: x2 with two NaNs
+	quietly gen double zn = 1
+	quietly gen double zu = x2
+	mata: _te_b = bufio(); bufbyteorder(_te_b, 1)
+	mata: _te_nan = bufget(_te_b, char((255, 254, 83, 248, 0, 0, 0, 0)), 0, "%8z", 1)
+	mata: st_store(7, "zn", _te_nan); st_store((7 \ 20000), "zu", J(2, 1, _te_nan))
+}
+capture program drop tn
+* tn "<command>" fast|fallback: runs the command with fastata off and on, from frame bn
+program tn
+	args cmd kind
+	foreach f in fa fb {
+		capture frame drop `f'
+		frame copy bn `f'
+	}
+	quietly fastata off
+	set sortseed 20261015
+	frame fa: capture noisily `cmd'
+	local rca = _rc
+	quietly fastata on
+	_fx status
+	local k0 = cond("`kind'" == "fast", `fx_nfast_egen', `fx_nfb_egen')
+	set sortseed 20261015
+	frame fb: capture noisily `cmd'
+	local rcb = _rc
+	_fx status
+	local k1 = cond("`kind'" == "fast", `fx_nfast_egen', `fx_nfb_egen')
+	mata: st_local("same", strofreal(_te_samebits("fa", "fb")))
+	if `rca' != `rcb' | `k1' != `k0' + 1 | !`same' {
+		global TE_NFAIL = $TE_NFAIL + 1
+		di as err `"TEST_EGEN FAIL: `cmd' [NaN; rc `rca' vs `rcb', path `kind' `=`k1'-`k0'', same bits `same']"'
+	}
+	global TE_N = $TE_N + 1
+end
+mata:
+// 1 when frames fa and fb have the same variables with bitwise-equal values (NaN included).
+real scalar _te_samebits(string scalar fa, string scalar fb)
+{
+	string scalar cur
+	string rowvector va, vb
+	string matrix a, b
+	real scalar j
+
+	cur = st_framecurrent()
+	st_framecurrent(fa)
+	va = st_varname(1..st_nvar())
+	a = J(st_nobs(), 0, "")
+	for (j = 1; j <= st_nvar(); j++) a = a, (st_isstrvar(j) ? st_sdata(., j) : strofreal(st_data(., j), "%21x"))
+	st_framecurrent(fb)
+	vb = st_varname(1..st_nvar())
+	b = J(st_nobs(), 0, "")
+	for (j = 1; j <= st_nvar(); j++) b = b, (st_isstrvar(j) ? st_sdata(., j) : strofreal(st_data(., j), "%21x"))
+	st_framecurrent(cur)
+	return(va == vb & a == b)
+}
+end
+tn "egen v = group(g) if u < .5" fast
+tn "egen v = mean(x1), by(g)" fast
+tn "egen v = mean(zn)" fallback
+tn "egen v = mean(zu), by(g)" fallback
+tn "bysort g: egen v = total(zu)" fallback
+* (a NaN in a key also falls back, see src/egen/tests.rs; not run here: Stata's own sort never
+* returns on a NaN key, with or without fastata)
+tn "egen v = rowtotal(x1 zu)" fallback
+* an expression turns a NaN into . (as Stata evaluates every expression): fast path
+tn "egen v = rank(zu * 2)" fast
+* verify mode with a NaN in a variable the call does not read: no mismatch
+frame copy bn bv
+frame bv {
+	_fx status
+	local ok0 `fx_vok_egen'
+	local bad0 = `fx_vmis_egen' + `fx_vskip_egen'
+	_fx mode verify
+	egen v1 = group(g) if u < .5
+	egen v2 = mean(x1), by(g)
+	_fx mode auto
+	_fx status
+	if `fx_vok_egen' != `ok0' + 2 | `fx_vmis_egen' + `fx_vskip_egen' != `bad0' {
+		global TE_NFAIL = $TE_NFAIL + 1
+		di as err "TEST_EGEN FAIL: verify mode with a NaN in another variable (ok +`=`fx_vok_egen'-`ok0'', not ok +`=`fx_vmis_egen'+`fx_vskip_egen'-`bad0'')"
+	}
+	global TE_N = $TE_N + 2
+}
+frame drop bv
+frame drop bn
+
 * ---- inputs that fall back
 te "egen x1 = mean(x2)" fallback
 te "egen v = mean(s)" fallback
