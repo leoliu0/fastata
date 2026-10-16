@@ -422,6 +422,47 @@ te "egen v = rowtotal(x*)" fast
 te "egen v = rowtotal(*1)" fallback
 te `"egen v = rank(cond(s == "s1", x1, x2))"' fallback
 
+* ---- group() on more than 50,000 observations: _ggroup.ado looks for the groups in a sample of
+* the data (a non-quiet mata: line, {res} in an SMCL log) when the sample has an observation,
+* the keys are fewer than log2(_N), numeric and integer-valued in the sample, and missing is not
+* specified; otherwise it sorts (dataverse-77YTLD: egen firmtime = group(nit date_q))
+frame create big
+frame big {
+	quietly {
+		set obs 60000
+		gen long nit = 1000 + floor(runiform()*3000)
+		gen float date_q = yq(2004, 1) + floor(runiform()*13)
+		format date_q %tq
+		gen double xd = floor(runiform()*40)
+		gen double xn = floor(runiform()*40) + .5
+		gen byte odd = mod(_n, 2)
+		gen double xh = cond(odd, floor(runiform()*40), floor(runiform()*40) + .5)
+		gen double xm = cond(runiform() < .05, ., cond(runiform() < .02, .a, floor(runiform()*9)))
+		gen str3 ks = "k" + string(floor(runiform()*30))
+		forvalues i = 1/16 {
+			gen byte b`i' = runiform() < .5
+		}
+	}
+}
+frame copy big big5
+frame big5: quietly keep in 1/50000
+te "egen v = group(nit date_q)" fast big
+te "egen double v = group(date_q nit)" fast big
+te "version 18: egen long v = group(nit date_q)" fast big
+te "egen v = group(xd)" fast big
+te "egen v = group(xn)" fast big
+te "egen v = group(xh)" fast big
+te "egen v = group(xh) if odd" fast big
+te "egen v = group(xh nit) if !odd" fast big
+te "egen v = group(xm nit)" fast big
+te "egen v = group(xm nit), missing" fast big
+te "egen v = group(nit ks)" fast big
+te "egen v = group(nit) in 1/40000" fast big
+te "egen v = group(nit) if nit < 0" fast big
+te "egen v = group(b1-b15)" fast big
+te "egen v = group(b1-b16)" fast big
+te "egen v = group(nit date_q)" fast big5
+
 if $TE_NFAIL {
 	di as err "TEST_EGEN failed: $TE_NFAIL of $TE_N specs (lines TEST_EGEN FAIL above)"
 	exit 9
