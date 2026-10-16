@@ -1251,7 +1251,7 @@ void _fx_runtime_build(string scalar dir0, string scalar ver)
 	for (i = 1; i <= cols(files); i++) {
 		p = findfile(files[i], src)
 		if (p == "") {
-			errprintf("fastata: %s not found; reinstall fastata\n", files[i])
+			_fx_reinstall(files[i])
 			exit(601)
 		}
 		if (_fx_copy(p, rd + files[i])) {
@@ -1264,7 +1264,7 @@ void _fx_runtime_build(string scalar dir0, string scalar ver)
 	// same file loaded; the loaded file is then the right one.
 	p = findfile("fastata.plugin", src)
 	if (p == "") {
-		errprintf("fastata: fastata.plugin not found; reinstall fastata\n")
+		_fx_reinstall("fastata.plugin")
 		exit(601)
 	}
 	plug = "fastata_" + ver + ".plugin"
@@ -1298,6 +1298,14 @@ void _fx_runtime_build(string scalar dir0, string scalar ver)
 	}
 	// Last, so that a runtime directory without it (or with another version) is rebuilt.
 	_fx_writelines(rd + "fastata_runtime.txt", ver)
+}
+
+// Error message for an installed file that is missing, with the command that reinstalls fastata.
+void _fx_reinstall(string scalar file)
+{
+	errprintf("fastata: %s not found; reinstall fastata with\n", file)
+	errprintf("  net install fastata, from(%shttps://leoliu0.github.io/fastata%s) replace\n",
+		char(34), char(34))
 }
 
 // The runtime directory for the current PLUS: <PLUS>fastata/ as an absolute path with forward
