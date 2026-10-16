@@ -15,6 +15,7 @@ mod egen;
 mod error;
 mod group;
 mod io;
+mod nan;
 mod par;
 mod quant;
 mod selftest;

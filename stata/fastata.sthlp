@@ -100,7 +100,8 @@ and {cmd:%}{it:W}{cmd:.0f}, and non-integer values{p_end}
 {p2colreset}{...}
 
 {pstd}
-Binary strL values and datasets with 2^32 or more observations always run the original.
+Binary strL values, NaN values (which a plugin or Mata can store) in a variable the command
+reads, and datasets with 2^32 or more observations always run the original.
 
 
 {marker contract}{...}

@@ -7,6 +7,12 @@ pub fn miss_a() -> f64 {
     MISS * (1.0 + 2f64.powi(-12))
 }
 
+/// A NaN as a plugin or Mata's `st_store()` can leave in a Stata variable (dataverse-A9ZFFF held
+/// this one: sign bit set, a payload).
+pub fn stata_nan() -> f64 {
+    f64::from_bits(0xfffe_53f8_0000_0000)
+}
+
 pub struct Rng(u64);
 
 impl Rng {
