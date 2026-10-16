@@ -12,7 +12,11 @@
 *       set: the mode survives clear all, _fx mode auto overrides the env var, and a fast path
 *       broken on purpose (a copy of _fx_xtile that changes one value) is reported as
 *       verify_mismatch while the original's value is kept, and a call whose snapshot cannot be
-*       made (no frame left) is verify_skipped and keeps the fast path's result;
+*       made (no frame left) is verify_skipped and keeps the fast path's result; copies of
+*       _fx_xtile and _fx_egen that change a single value after storing their result (of another
+*       variable: a number, a byte of a str# or strL, a NaN payload, the sign of a zero; or of the
+*       result, which for egen mean() by unsorted groups has the accumulation-class tolerance)
+*       are reported as verify_mismatch in that variable;
 * (iii) the FASTATA_COUNTS lines written by (ii), and the session counts of _fx status.
 * Ends with TEST_VERIFY passed.
 version 16
@@ -308,12 +312,20 @@ if !`done' {
 mata: tv_counts = cat(st_local("counts"))
 mata: tv_counts
 * the line of a verification without snapshot ends with the frame copy's return code
-mata: st_local("ok", strofreal(rows(tv_counts) == 10))
+mata: st_local("ok", strofreal(rows(tv_counts) == 34))
 assert `ok'
 mata: st_local("ok", strofreal(regexm(tv_counts[9], "^xtile,verify_skipped,snapshot r[(][0-9]+[)]$")))
 assert `ok'
 mata: tv_counts[9] = "skipped"
-mata: st_local("ok", strofreal(tv_counts == ("egen,fast," \ "egen,verify_ok," \ "xtile,fast," \ "xtile,verify_ok," \ "xtile,fast," \ "xtile,fast," \ "xtile,verify_mismatch,values of q3 (1 obs; first obs 1: 2 vs 1)" \ "xtile,fast," \ "skipped" \ "isid,fallback,mode original")))
+mata: st_local("ok", strofreal(tv_counts[1..10] == ("egen,fast," \ "egen,verify_ok," \ "xtile,fast," \ "xtile,verify_ok," \ "xtile,fast," \ "xtile,fast," \ "xtile,verify_mismatch,values of q3 (1 obs; first obs 1: 2 vs 1)" \ "xtile,fast," \ "skipped" \ "isid,fallback,mode original")))
+assert `ok'
+* the planted changes: in headroom, make, ml, zn (a NaN payload), nz (the sign of zero) and the
+* result r (bitwise for xtile, beyond the tolerance for egen mean() by unsorted groups)
+mata: tv_x = ("values of headroom (1 obs; first obs 7: 4 vs 3)" \ "strings of make (1 obs; first obs 9)" \ "strings of ml (1 obs; first obs 9)" \ "NaN values of zn" \ "sign of zero in nz")
+mata: tv_x = ("xtile,verify_mismatch," :+ (tv_x \ "values of r (1 obs; first obs 7: 3 vs 2)")) \ ("egen,verify_mismatch,mean(): " :+ (tv_x \ "values of r beyond the tolerance (max reldif 1.55e-04; first obs 7: 6431.399999999999636 vs 6430.399999999999636)") :+ " | double r = mean(price); by(rep78)")
+mata: tv_x = colshape(((J(6, 1, "xtile,fast,") \ J(6, 1, "egen,fast,")), tv_x), 1)
+mata: st_local("ok", strofreal(tv_counts[11..34] == tv_x))
+if !`ok' mata: (tv_counts[11..34], tv_x)[selectindex(tv_counts[11..34] :!= tv_x), .]
 assert `ok'
 erase `"`counts'"'
 erase verify_child.log

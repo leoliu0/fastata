@@ -67,4 +67,59 @@ assert `fx_vskip_xtile' == 1
 _fx mode original
 isid make
 
+* fast paths broken on purpose: copies of _fx_xtile (bitwise comparison) and _fx_egen (mean() by
+* unsorted groups, whose result r is in the accumulation class) that run global TV_PLANT after storing
+* r. Each plant changes a single value: of another variable (a number, one byte of a str# or a
+* strL, a NaN payload, the sign of a zero: compared bitwise even when r has a tolerance) or of r
+* itself. Verify reports it in that variable and keeps the original's data
+_fx mode verify
+sysuse auto, clear
+quietly {
+	gen strL ml = make
+	gen double zn = 1
+	gen double nz = 0
+}
+mata: _tv_b = bufio(); bufbyteorder(_tv_b, 1)
+mata: _tv_nan1 = bufget(_tv_b, char((255, 254, 83, 248, 0, 0, 0, 0)), 0, "%8z", 1)
+mata: _tv_nan2 = bufget(_tv_b, char((255, 254, 83, 248, 0, 0, 0, 1)), 0, "%8z", 1)
+mata: st_store(7, "zn", _tv_nan1)
+frame copy default tvbase
+local plants `""quietly replace headroom = headroom + 1 in 7""'
+local plants `"`plants' `"mata: st_sstore(9, "make", "Z" + substr(st_sdata(9, "make"), 2, .))"'"'
+local plants `"`plants' `"mata: st_sstore(9, "ml", "Z" + substr(st_sdata(9, "ml"), 2, .))"'"'
+local plants `"`plants' `"mata: st_store(7, "zn", _tv_nan2)"'"'
+local plants `"`plants' `"mata: st_store(3, "nz", -(1e-300*1e-300))"'"'
+local plants `"`plants' "quietly replace r = r + 1 in 7""'
+capture program drop Fast Parse6 Mark6 Gen6
+foreach f in xtile egen {
+	tempfile b`f'
+	local at = cond("`f'" == "xtile", "label var " + char(96) + "p_var'", "_fx store " + char(96) + "fx_token' " + char(96) + "otype' " + char(96) + "name'")
+	mata: l = cat(findfile("_fx_`f'.ado")); i = selectindex(strpos(l, st_local("at")) :> 0); assert(rows(i) == 1)
+	* (the inserted line, a tab and the global's name, is built with char() so that this do-file
+	* does not expand the global)
+	if "`f'" == "xtile" mata: l = l[1..i-1] \ (char(9) + char(36) + "TV_PLANT") \ l[i..rows(l)]
+	else mata: l = l[1..i] \ (char(9) + char(36) + "TV_PLANT") \ l[i+1..rows(l)]
+	mata: fh = fopen(st_local("b`f'"), "w"); for (j = 1; j <= rows(l); j++) fput(fh, l[j]); fclose(fh)
+	capture program drop _fx_`f'
+	run `"`b`f''"'
+	foreach p of local plants {
+		capture frame drop work
+		frame copy tvbase work
+		frame work {
+			global TV_PLANT `"`p'"'
+			if "`f'" == "xtile" xtile r = price, nq(4)
+			else egen double r = mean(price), by(rep78)
+			* the original's data: headroom, make, ml, zn's NaN and nz's +0 as before
+			assert headroom == _frval(tvbase, headroom, _n) & make == _frval(tvbase, make, _n)
+			assert ml == _frval(tvbase, ml, _n)
+			mata: _tv_x = " " * 8; bufput(_tv_b, _tv_x, 0, "%8z", st_data(7, "zn")); assert(ascii(_tv_x)[8] == 0 & st_data(7, "zn") != st_data(7, "zn"))
+			mata: bufput(_tv_b, _tv_x, 0, "%8z", st_data(3, "nz")); assert(ascii(_tv_x)[1] == 0)
+		}
+	}
+	global TV_PLANT
+	program drop _fx_`f' Fast
+	capture program drop Parse6 Mark6 Gen6
+}
+frame drop work tvbase
+
 di "VERIFY_CHILD passed"

@@ -143,6 +143,11 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Op
     let mut out = vec_filled(n, miss)?;
     let quantile = matches!(s.fcn, Fcn::Median | Fcn::Pctile | Fcn::Iqr);
     let nonmiss_total = if quantile && !by {
+        // `_pctile` orders -0 and +0 as ties, in an order of its own
+        let zero = |neg: bool| g.ord.iter().any(|&o| x[o as usize] == 0.0 && x[o as usize].is_sign_negative() == neg);
+        if zero(true) && zero(false) {
+            return Err(Error::fallback("signed zero"));
+        }
         Some(g.ord.iter().filter(|&&o| x[o as usize] < miss).count())
     } else {
         None
@@ -164,7 +169,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Op
             Fcn::Total => put_all(reduce::total(scratch, miss, by, s.missing)),
             Fcn::Mean => put_all(reduce::mean(scratch, miss, by)),
             Fcn::Count => put_all(reduce::count(scratch, miss)),
-            Fcn::Max | Fcn::Min => put_all(reduce::extreme(scratch, miss, s.fcn == Fcn::Max, s.missing)),
+            Fcn::Max | Fcn::Min => put_all(reduce::extreme(scratch, miss, s.fcn == Fcn::Max, s.missing, by)),
             Fcn::Sd => put_all(reduce::mean_sd(scratch, miss, by).1),
             Fcn::Std => {
                 let (m, sd) = reduce::mean_sd(scratch, miss, by);
