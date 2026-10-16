@@ -6,7 +6,7 @@ import argparse
 import json
 import sys
 
-from . import compare, discover, fetch, paths, pipeline, prepare, report, runner, scan, state
+from . import compare, discover, fetch, paths, pipeline, prepare, provenance, report, runner, scan, state
 
 DEFAULT_SOURCES = "dataverse,zenodo"
 
@@ -96,9 +96,13 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("reset", help="forget recorded stages so that they run again")
     p.add_argument("pkgs", nargs="*")
     p.add_argument("--failed", action="store_true", help="every package that failed at or after --from")
+    p.add_argument("--stale", action="store_true",
+                   help="every package whose fastata arm (V, F) ran with other fastata code than this checkout's "
+                        "(commit and plugin hash) or with no record of it")
     p.add_argument("--from", dest="start", choices=["fetch", "scan", "prepare", "run", "V", "compare"],
-                   default="prepare", help="V: verify again (clears the fastata arms and the comparison, "
-                   "keeps prepare and arm A when arm A's outputs are still there)")
+                   help="where to start again (default V with --stale, else prepare). V: verify again (clears "
+                   "the fastata arms and the comparison, keeps prepare and arm A when arm A's outputs are still there)")
+    p.add_argument("--dry-run", action="store_true", help="list the packages, change nothing")
 
     p = sub.add_parser("status", help="stage records of packages")
     p.add_argument("pkgs", nargs="*")
@@ -129,10 +133,12 @@ def main(argv: list[str] | None = None) -> int:
                          fetch_only=a.fetch_only)
         return 0 if n >= a.target else 1
     elif a.cmd == "reset":
+        a.start = a.start or ("V" if a.stale else "prepare")
         order = ["fetch", "scan", "prepare", "run_A", "run_V", "run_F", "run_A2", "run_B", "compare"]
         start = {"run": "run_A", "V": "run_V"}.get(a.start, a.start)
         i0 = order.index(start)
         pkgs = list(a.pkgs)
+        why: dict[str, str] = {}
         if a.failed:
             for st in report.pkg_states():
                 e = report.exclusion(st)
@@ -140,6 +146,15 @@ def main(argv: list[str] | None = None) -> int:
                     e = "compare: FAIL"
                 if e and e.split(":", 1)[0] in order and order.index(e.split(":", 1)[0]) >= i0:
                     pkgs.append(st["pkg"])
+        if a.stale:
+            cur = provenance.fastata_code()
+            print(f"current fastata: {provenance.label(cur)}")
+            for st in report.pkg_states():
+                arms = provenance.stale_arms(st, cur)
+                if arms:
+                    pkgs.append(st["pkg"])
+                    why[st["pkg"]] = ", ".join(f"{n}: {provenance.label(st['stages'][n].get('fastata'))}" for n in arms)
+        pkgs = list(dict.fromkeys(pkgs))
         nA = 0
         for pkg in pkgs:
             names = order[i0:]
@@ -149,9 +164,13 @@ def main(argv: list[str] | None = None) -> int:
             if start in ("run_V", "compare") and not keep_a and state.ok(pkg, "run_A"):
                 names = ["run_A", *names]  # arm A's outputs are gone: run it again
                 nA += 1
+            if a.dry_run:
+                print(pkg, " ".join(names) + (f"  [{why[pkg]}]" if pkg in why else ""))
+                continue
             state.clear(pkg, *names)
             runner.remove_arms(pkg, keep_a=keep_a)
-        print(f"reset {len(pkgs)} package(s) from {a.start}" + (f" ({nA} rerun arm A: its outputs were deleted)" if nA else ""))
+        print(("would reset" if a.dry_run else "reset") + f" {len(pkgs)} package(s) from {a.start}"
+              + (f" ({nA} rerun arm A: its outputs were deleted)" if nA else ""))
     elif a.cmd == "status":
         pkgs = a.pkgs or [s["pkg"] for s in report.pkg_states()]
         for pkg in pkgs:

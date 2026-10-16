@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from . import paths, state
+from . import paths, provenance, state
 from .stataparse import REPLACED
 
 
@@ -32,6 +32,12 @@ def varm(st: dict) -> str:
 
 def calls_of(st: dict) -> dict[str, dict]:
     return (st["stages"].get(f"run_{varm(st)}") or {}).get("counts", {})
+
+
+def fastata_of(st: dict) -> dict | None:
+    """The fastata code the package was verified with (compare record, else its arm's record)."""
+    cm = st["stages"].get("compare") or {}
+    return cm.get("fastata") or (st["stages"].get(f"run_{varm(st)}") or {}).get("fastata")
 
 
 def is_counted(st: dict, count_on: str) -> bool:
@@ -93,8 +99,14 @@ def render(count_on: str = "fast") -> str:
           f"- verified calls (counted packages): ok {vv['verify_ok']}, mismatch {vv['verify_mismatch']}, "
           f"skipped {vv['verify_skipped']}",
           f"- compared packages: {len(done)}; packages tried: {len(sts)}",
-          "- file verdicts (all compared packages): " + ", ".join(f"{k} {vt.get(k, 0)}" for k in FILE_VERDICTS),
-          ""]
+          "- file verdicts (all compared packages): " + ", ".join(f"{k} {vt.get(k, 0)}" for k in FILE_VERDICTS)]
+    cur = provenance.label(provenance.fastata_code())
+    used = Counter(provenance.label(fastata_of(s)) for s in counted)
+    L.append("- fastata the counted packages were verified with: "
+             + ("; ".join(f"`{k}`: {n}" + (" (current)" if k == cur else "")
+                          for k, n in sorted(used.items(), key=lambda kv: -kv[1])) or "none")
+             + (" **(mixed)**" if len(used) > 1 else ""))
+    L.append("")
     cov = Counter()
     tot: dict[str, Counter] = {c: Counter() for c in REPLACED}
     static_tot = Counter()
@@ -112,9 +124,9 @@ def render(count_on: str = "fast") -> str:
         L.append(f"|`{c}`|{cov[c]}|{t['fast']}|{t['fallback']}|{t['verify_ok']}|{t['verify_mismatch']}|"
                  f"{t['verify_skipped']}|{static_tot[c]}|")
     L += ["", "## Packages", "",
-          "|package|journal|year|DOI|title|arm|A s|arm s|arm/A|calls (fast/fallback)|verify ok/mismatch/skipped|"
+          "|package|journal|year|DOI|title|arm|fastata|A s|arm s|arm/A|calls (fast/fallback)|verify ok/mismatch/skipped|"
           "SAME|NEAR|TIE|NONDET|DIFF|SKIP|verdict|",
-          "|---|---|---|---|---|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---|"]
+          "|---|---|---|---|---|---|---|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---|"]
     for s in sorted(done, key=lambda s: s["pkg"]):
         i = s.get("info", {})
         arm = varm(s)
@@ -130,6 +142,7 @@ def render(count_on: str = "fast") -> str:
         doi = i.get("doi", "")
         mark = "" if is_counted(s, count_on) else " (not counted)"
         L.append(f"|{s['pkg']}|{i.get('journal', '')}|{i.get('year', '')}|[{doi}](https://doi.org/{doi})|{title}|{arm}|"
+                 f"{provenance.label(fastata_of(s))}|"
                  f"{_fmt_s(a)}|{_fmt_s(f)}|{ratio}|{calls}|{ver}|" + "|".join(str(k.get(x, 0)) for x in
                  ("SAME", "NEAR", "TIE", "NONDET", "DIFF", "SKIP")) + f"|{cm.get('verdict', '')}{mark}|")
     mism = [(s["pkg"], m) for s in done for m in s["stages"]["compare"].get("mismatches", [])]

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from repl import paths, pipeline, report, scan, state
+from repl import paths, pipeline, provenance, report, scan, state
 
 pytestmark = pytest.mark.skipif(not (shutil.which("stata-mp") and shutil.which("bwrap")),
                                 reason="needs stata-mp and bwrap")
@@ -126,6 +126,7 @@ def test_verify_arm(root):
     assert r.get("arm") == "V" and r["verdict"] == "PASS", (r, state.load(ok))
     assert r["counts"]["NONDET"] == 1 and r["counts"]["DIFF"] == 0, r["notes"]
     assert r["verify"]["verify_mismatch"] == 0 and r["verify"]["verify_ok"] >= 1, r["verify"]
+    assert r["fastata"] == state.stage(ok, "run_V")["fastata"] == provenance.fastata_code()
     assert state.ok(ok, "run_A2") and not state.done(ok, "run_B")
     calls = state.stage(ok, "run_V")["counts"]
     assert calls["egen"]["fast"] + calls["egen"]["fallback"] == 2

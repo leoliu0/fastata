@@ -30,7 +30,7 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
-from . import paths, sandbox, state
+from . import paths, provenance, sandbox, state
 from .patching import apply_patches, load_meta
 from .stataparse import REPLACED
 
@@ -273,9 +273,12 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
     home.mkdir()
     ro = [paths.pkg_dir(pkg)]
     env: dict[str, str] = {}
+    info: dict = {}
     if arm in FASTATA_ARMS:
         if not (paths.FASTATA_STATA / "fastata.linux64.plugin").exists():
             return state.record(pkg, stage_name, False, reason="plugin not built (bash scripts/build_plugin.sh)")
+        # the code net install takes from stata/ now (kept in every record of this run)
+        info["fastata"] = provenance.fastata_code()
         ro.append(paths.FASTATA_STATA)
         (home / "_fxrepl_setup.do").write_text(setup_text())
         r = sandbox.stata_batch(home / "_fxrepl_setup.do", cwd=home, home=home, rw=[root], ro=ro, timeout=600)
@@ -283,7 +286,8 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
         if slog:
             shutil.copy2(home / "_fxrepl_setup.log", res / f"arm_{arm}_setup.log")
         if "fastata: enabled; Stata loads it at startup through" not in slog or "on now:      yes" not in slog:
-            return state.record(pkg, stage_name, False, reason=f"fastata setup failed (see results/arm_{arm}_setup.log)")
+            return state.record(pkg, stage_name, False, reason=f"fastata setup failed (see results/arm_{arm}_setup.log)",
+                                **info)
         env["FASTATA_COUNTS"] = str(root / CALLS)
         if arm == "V":
             env["FASTATA_MODE"] = "verify"  # for a fastata that reads it (survives clear all)
@@ -297,7 +301,7 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
     text = wlog.read_text(errors="replace") if wlog.exists() else ""
     if wlog.exists():
         shutil.copy2(wlog, res / f"arm_{arm}.log")
-    info: dict = {"seconds": round(r.seconds, 1)}
+    info["seconds"] = round(r.seconds, 1)
     if arm in FASTATA_ARMS:
         agg = aggregate_calls(root / CALLS)
         write_counts_csv(agg, res / f"fastata_counts_{arm}.csv")

@@ -404,10 +404,11 @@ def compare(pkg: str, force: bool = False, arm: str = "V") -> dict:
         rows.append({"file": f, "verdict": v, "af": list(af[f]), "ab": list(ab[f]) if f in ab else None,
                      "units": refined[f][1] if f in refined else None})
     (runner.results_dir(pkg) / "compare.json").write_text(json.dumps(rows, indent=1))
-    calls = (state.stage(pkg, f"run_{arm}") or {}).get("counts", {})
+    run = state.stage(pkg, f"run_{arm}") or {}
+    calls = run.get("counts", {})
     vt = verify_totals(calls)
     mismatches = [f"{c}: {m}" for c, v in sorted(calls.items()) for m in v.get("mismatches", [])]
     ok = counts["DIFF"] == 0 and counts["ERR"] == 0 and vt["verify_mismatch"] == 0
     return state.record(pkg, "compare", True, arm=arm, verdict="PASS" if ok else "FAIL", counts=counts,
-                        verify=vt, mismatches=mismatches[:100],
+                        verify=vt, mismatches=mismatches[:100], fastata=run.get("fastata"),
                         notes=[r for r in rows if r["verdict"] in ("NEAR", "TIE", "NONDET", "DIFF", "ERR")][:50])
