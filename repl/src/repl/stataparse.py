@@ -101,10 +101,15 @@ def do_targets(text: str) -> list[str]:
 MASTER_NAME = re.compile(r"master|main|run_?all|replicat|^0+_?run", re.I)
 
 
+def is_readme(name: str) -> bool:
+    """A README file find_master reads."""
+    return bool(re.match(r"read_?me", name, re.I)) and Path(name).suffix.lower() in (".md", ".txt", ".rtf", "")
+
+
 def _readme_text(root: Path) -> str:
     texts = []
     for p in sorted(root.rglob("*")):
-        if p.is_file() and re.match(r"read_?me", p.name, re.I) and p.suffix.lower() in (".md", ".txt", ".rtf", ""):
+        if p.is_file() and is_readme(p.name):
             texts.append(read_text(p))
     return "\n".join(texts)
 

@@ -2,8 +2,10 @@
 (-> A2, or B for F, when files differ) -> compare.
 
 Newest candidates first; among fetched eligible packages, those calling a replaced command that
-still has fewer than 5 counted packages go first. Up to `workers` packages run at a time. After
-each comparison, arm A is pruned to its outputs (so fastata can be verified again without
+still has fewer than 5 counted packages go first. Up to `workers` packages run at a time, while
+`fetchers` threads fetch ahead (up to `lookahead` eligible packages waiting). A package is
+prescanned first (only the files scan reads), and downloaded in full only when it is eligible.
+After each comparison, arm A is pruned to its outputs (so fastata can be verified again without
 rerunning it) and the other arm directories are deleted. Every stage is recorded in <pkg>/state.json, so a
 stopped pipeline restarts where it was. Stops at `target` counted packages or when the
 candidates run out.
@@ -12,11 +14,11 @@ candidates run out.
 from __future__ import annotations
 
 import shutil
-import threading
+import time
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from typing import Iterator
 
-from . import compare, discover, fetch, paths, prepare, report, runner, scan, state
+from . import compare, discover, fetch, net, paths, prepare, report, runner, scan, state
 from .discover import Candidate
 
 COVER_MIN = 5
@@ -86,18 +88,52 @@ def _excluded(pkg: str) -> bool:
 
 
 def fetch_and_scan(c: Candidate, keep_src: bool, log=_log) -> bool:
-    """True if c is fetched and eligible."""
+    """True if c is fetched and eligible. Unless already fetched, c is prescanned first: a package
+    whose prescan is ineligible is never downloaded in full. The time and the requests it took
+    are recorded in the package's info (fetch_seconds, fetch_requests)."""
+    fetched = state.done(c.pkg, "fetch")
+    t0 = time.monotonic()
+    with net.track() as req:
+        ok = _fetch_and_scan(c, keep_src, log)
+    if not fetched:
+        state.set_info(c.pkg, fetch_seconds=round(time.monotonic() - t0, 1), fetch_requests=dict(req))
+    return ok
+
+
+def _fetch_and_scan(c: Candidate, keep_src: bool, log) -> bool:
     pkg = c.pkg
+    src = paths.pkg_dir(pkg) / "src"
+
+    def reject(reason: str) -> bool:
+        log(f"{pkg}: not eligible: {reason}")
+        if not keep_src:
+            shutil.rmtree(src, ignore_errors=True)
+        return False
+
+    if not state.done(pkg, "fetch"):
+        state.set_info(pkg, source=c.source, id=c.id, doi=c.doi, journal=c.journal, year=c.year,
+                       title=c.title, date=c.date, url=c.url)
+        try:
+            decided = fetch.prescan(c)
+        except fetch.FetchError as e:
+            log(f"{pkg}: fetch failed: {e}")
+            state.record(pkg, "fetch", False, reason=str(e))
+            return False
+        except Exception as e:  # noqa: BLE001 - the full fetch decides
+            log(f"{pkg}: prescan failed ({type(e).__name__}: {e}); fetching in full")
+            decided = False
+        if decided:
+            r = scan.scan_tree(src)
+            if not r.pop("eligible"):
+                state.record(pkg, "scan", False, prescan=True, **r)
+                return reject(r["reason"])
     f = fetch.fetch(c)
     if not f.get("ok"):
         log(f"{pkg}: fetch failed: {f.get('reason', '')}")
         return False
     s = scan.scan(pkg)
     if not s.get("ok"):
-        log(f"{pkg}: not eligible: {s.get('reason', '')}")
-        if not keep_src:
-            shutil.rmtree(paths.pkg_dir(pkg) / "src", ignore_errors=True)
-        return False
+        return reject(s.get("reason", ""))
     return True
 
 
@@ -111,14 +147,18 @@ def select_candidates(sources: list[str], max_bytes: int, only: list[str] | None
     return out
 
 
-def run(target: int, sources: list[str], count_on: str = "fast", workers: int = 4, lookahead: int = 6,
-        max_bytes: int = discover.MAX_BYTES, only: list[str] | None = None, keep_arms: bool = False,
-        keep_src: bool = False, eager_b: bool = False, rediscover: bool = False,
-        arms: tuple[str, ...] = DEFAULT_ARMS, log=_log) -> int:
+def run(target: int, sources: list[str], count_on: str = "fast", workers: int = 4, fetchers: int = 6,
+        lookahead: int | None = None, max_bytes: int = discover.MAX_BYTES, only: list[str] | None = None,
+        keep_arms: bool = False, keep_src: bool = False, eager_b: bool = False, rediscover: bool = False,
+        arms: tuple[str, ...] = DEFAULT_ARMS, fetch_only: bool = False, log=_log) -> int:
+    """Returns the number of counted packages (with fetch_only: of eligible fetched packages,
+    target being how many to fetch)."""
     if rediscover or not paths.candidates_csv().exists():
         discover.discover(sources, log=log)
     cands = select_candidates(sources, max_bytes, only)
-    log(f"pipeline: {len(cands)} candidates, target {target} counted packages ({count_on})")
+    lookahead = max(1, workers if lookahead is None else lookahead)
+    log(f"pipeline: {len(cands)} candidates, target {target} "
+        + ("eligible packages (fetch only)" if fetch_only else f"counted packages ({count_on})"))
     counted = {c.pkg for c in cands if (paths.pkg_dir(c.pkg) / "state.json").exists() and _counted(c.pkg, count_on)}
     cover: dict[str, int] = {}
     for p in counted:
@@ -127,72 +167,88 @@ def run(target: int, sources: list[str], count_on: str = "fast", workers: int = 
 
     it: Iterator[Candidate] = iter(c for c in cands if c.pkg not in counted)
     ready: list[str] = []
+    fetching: dict[Future, Candidate] = {}
+    inflight: dict[Future, str] = {}
     exhausted = False
-    lock = threading.Lock()
+    judged = eligible = 0
+    t0 = time.monotonic()
+    req0 = net.counts()
 
     def priority(pkg: str) -> tuple[int, int]:
         rare = any(n > 0 and cover.get(cmd, 0) < COVER_MIN for cmd, n in _calls(pkg).items())
         return (0 if rare else 1, 0)
 
-    def fill(n: int) -> None:
-        nonlocal exhausted
-        while not exhausted and len(ready) < n:
-            c = next(it, None)
-            if c is None:
-                exhausted = True
-                return
-            if (paths.pkg_dir(c.pkg) / "state.json").exists() and _excluded(c.pkg):
-                continue
-            if c.source == "dataverse" and not state.done(c.pkg, "fetch"):
-                try:
-                    _, _, c.size_bytes = discover.dv_judge(discover.dv_dataset_json("doi:" + c.doi))
-                except Exception as e:  # noqa: BLE001
-                    log(f"{c.pkg}: metadata error: {e}")
-                    continue
-            if c.size_bytes > max_bytes:
-                continue
+    def fetch_job(c: Candidate) -> bool:
+        if c.source == "dataverse" and not state.done(c.pkg, "fetch"):
             try:
-                if fetch_and_scan(c, keep_src, log):
-                    ready.append(c.pkg)
-            except Exception as e:  # noqa: BLE001 - one package must not stop the run
-                log(f"{c.pkg}: error before running: {type(e).__name__}: {e}")
+                _, _, c.size_bytes = discover.dv_judge(discover.dv_dataset_json("doi:" + c.doi))
+            except Exception as e:  # noqa: BLE001
+                log(f"{c.pkg}: metadata error: {e}")
+                return False
+            if c.size_bytes > max_bytes:
+                return False
+        return fetch_and_scan(c, keep_src, log)
 
-    inflight: dict[Future, str] = {}
-    with ThreadPoolExecutor(workers) as ex:
+    def want_more() -> bool:
+        if fetch_only:
+            return eligible + len(fetching) < target
+        return len(ready) + len(fetching) < lookahead and len(counted) < target
+
+    def fetch_rate() -> str:
+        mins = (time.monotonic() - t0) / 60
+        req = {h: n - req0.get(h, 0) for h, n in net.counts().items() if n > req0.get(h, 0)}
+        return (f"fetch: {judged} judged ({eligible} eligible) in {mins:.1f} min "
+                f"({judged / max(mins, 1e-9) * 60:.0f}/hour); requests {req}")
+
+    with ThreadPoolExecutor(workers) as ex, ThreadPoolExecutor(fetchers) as fx:
         while True:
-            while len(inflight) < workers and len(counted) + len(inflight) < target:
-                if not ready:
-                    fill(1)
-                if not ready:
-                    break
+            while not exhausted and len(fetching) < fetchers and want_more():
+                c = next(it, None)
+                if c is None:
+                    exhausted = True
+                elif not ((paths.pkg_dir(c.pkg) / "state.json").exists() and _excluded(c.pkg)) \
+                        and c.size_bytes <= max_bytes:
+                    fetching[fx.submit(fetch_job, c)] = c
+            while (not fetch_only and ready and len(inflight) < workers
+                   and len(counted) + len(inflight) < target):
                 ready.sort(key=priority)  # stable: newest first within a class
                 pkg = ready.pop(0)
                 log(f"{pkg}: start")
                 inflight[ex.submit(process, pkg, keep_arms, eager_b, arms, log)] = pkg
-            if not inflight:
+            if not inflight and not fetching:
                 break
-            if len(ready) < lookahead and not exhausted:
-                fill(len(ready) + 1)
-                done, _ = wait(inflight, timeout=0, return_when=FIRST_COMPLETED)
-                if not done:
-                    continue
-            else:
-                done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            done, _ = wait([*inflight, *fetching], return_when=FIRST_COMPLETED)
             for fu in done:
+                if fu in fetching:
+                    c = fetching.pop(fu)
+                    judged += 1
+                    try:
+                        ok = fu.result()
+                    except Exception as e:  # noqa: BLE001 - one package must not stop the run
+                        log(f"{c.pkg}: error before running: {type(e).__name__}: {e}")
+                        ok = False
+                    if ok:
+                        eligible += 1
+                        ready.append(c.pkg)
+                    if judged % 10 == 0:
+                        log(fetch_rate())
+                    continue
                 pkg = inflight.pop(fu)
                 try:
                     r = fu.result()
                 except Exception as e:  # noqa: BLE001
                     log(f"{pkg}: error: {type(e).__name__}: {e}")
                     continue
-                with lock:
-                    if _counted(pkg, count_on):
-                        counted.add(pkg)
-                        for cmd, n in _calls(pkg).items():
-                            cover[cmd] = cover.get(cmd, 0) + (n > 0)
+                if _counted(pkg, count_on):
+                    counted.add(pkg)
+                    for cmd, n in _calls(pkg).items():
+                        cover[cmd] = cover.get(cmd, 0) + (n > 0)
                 log(f"{pkg}: {r.get('verdict') or r.get('reason', '')} {r.get('counts', '')} "
                     f"(counted {len(counted)}/{target})")
-            report.report(count_on)
+                report.report(count_on)
+    log(fetch_rate())
+    if fetch_only:
+        return eligible
     report.report(count_on)
     log(f"pipeline: {len(counted)} counted packages; report {paths.results_md()}")
     return len(counted)

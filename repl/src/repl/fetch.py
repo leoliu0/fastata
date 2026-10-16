@@ -1,21 +1,32 @@
 """repl fetch: download a package into ~/fastata-repl/pkgs/<source>-<id>/src/ and unpack archives.
 
-Dataverse: per file (?format=original for ingested tabular files), under directoryLabel, named
-originalFileName, md5-checked. Zenodo: per file, md5-checked. AEA (only when the aea source is
+Dataverse: in zips of many files (/api/access/datafiles/<ids>?format=original: original formats of
+ingested tabular files), under directoryLabel, named originalFileName, md5-checked; files a zip
+leaves out are fetched one by one. Zenodo: per file, md5-checked. AEA (only when the aea source is
 requested): ICPSR login and project zip, else a zip the user put in inbox/aea/<projectid>.zip.
 Nested archives are unpacked in place (zip, tar), up to depth 3.
+
+prescan() fetches only what scan reads (do-files, other-language code, READMEs), reading large
+zips remotely through byte ranges, so that packages scan rejects are never downloaded.
 """
 
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
+import json
 import re
 import shutil
 import tarfile
+import threading
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import icpsr, net, paths, state
+import requests
+
+from . import icpsr, net, paths, scan, state
 from .discover import DATAVERSE, ZENODO, Candidate, dv_dataset_json, dv_file_size, dv_judge
 
 MAX_UNPACKED = 12 * 1024**3
@@ -68,16 +79,15 @@ def unpack_archive(arc: Path, into: Path) -> int:
     return n
 
 
-def is_archive(p: Path) -> bool:
-    n = p.name.lower()
-    return n.endswith((".zip", ".tar", ".tar.gz", ".tgz"))
+def is_archive_name(name: str) -> bool:
+    return name.lower().endswith((".zip", ".tar", ".tar.gz", ".tgz"))
 
 
 def unpack_tree(root: Path, depth: int = 3) -> int:
     """Unpacks every archive below root next to itself, then deletes it; repeats for nested ones."""
     n = 0
     for _ in range(depth):
-        arcs = [p for p in root.rglob("*") if p.is_file() and is_archive(p)]
+        arcs = [p for p in root.rglob("*") if p.is_file() and is_archive_name(p.name)]
         if not arcs:
             break
         for a in arcs:
@@ -92,52 +102,234 @@ def unpack_tree(root: Path, depth: int = 3) -> int:
 # ------------------------------------------------------------------------------- sources
 
 
-def fetch_dataverse(c: Candidate, src: Path) -> int:
+@dataclass
+class Remote:
+    """One file of a package as its repository lists it."""
+
+    rel: PurePosixPath  # path under src
+    size: int
+    md5: str | None
+    url: str
+    dv_id: int | None = None  # Dataverse file id (bulk downloads)
+
+
+def dv_files(c: Candidate) -> list[Remote]:
     d = dv_dataset_json("doi:" + c.doi)
     status, why, _ = dv_judge(d)
     if status != "ok":
         raise FetchError(why)
-    total = 0
+    out = []
     for f in d["latestVersion"]["files"]:
         df = f["dataFile"]
         name = df.get("originalFileName") or df.get("filename")
         rel = _safe_rel(f"{f.get('directoryLabel', '')}/{name}")
         if rel is None:
             continue
-        dest = src / rel
-        size = dv_file_size(f)
-        if dest.exists() and dest.stat().st_size == size:
-            total += size
-            continue
         url = f"{DATAVERSE}/api/access/datafile/{df['id']}"
         if df.get("tabularData"):
             url += "?format=original"
         ck = df.get("checksum", {})
         md5 = ck.get("value") if ck.get("type") == "MD5" else df.get("md5")
-        total += net.download(url, dest, md5=md5)
-    return total
+        out.append(Remote(rel, dv_file_size(f), md5, url, int(df["id"])))
+    return out
 
 
-def fetch_zenodo(c: Candidate, src: Path) -> int:
-    rec = net.get_json(f"{ZENODO}/api/records/{c.id}")
-    total = 0
-    for f in rec.get("files", []):
+def zn_record(rec_id: str) -> dict:
+    """The Zenodo record (with its file list), cached under cache/zenodo."""
+    cache = paths.cache_dir() / "zenodo" / f"{rec_id}.json"
+    if cache.exists():
+        return json.loads(cache.read_text())
+    rec = net.get_json(f"{ZENODO}/api/records/{rec_id}")
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(rec))
+    return rec
+
+
+def zn_files(c: Candidate) -> list[Remote]:
+    out = []
+    for f in zn_record(c.id).get("files", []):
         rel = _safe_rel(f["key"])
         if rel is None:
-            continue
-        dest = src / rel
-        if dest.exists() and dest.stat().st_size == int(f.get("size", -1)):
-            total += dest.stat().st_size
             continue
         ck = f.get("checksum", "")
         md5 = ck.split(":", 1)[1] if ck.startswith("md5:") else None
         url = f.get("links", {}).get("self") or f"{ZENODO}/api/records/{c.id}/files/{f['key']}/content"
-        total += net.download(url, dest, md5=md5)
-    return total
+        out.append(Remote(rel, int(f.get("size", -1)), md5, url))
+    return out
+
+
+LISTERS = {"dataverse": dv_files, "zenodo": zn_files}
+
+
+def _present(src: Path, f: Remote) -> bool:
+    p = src / f.rel
+    return p.is_file() and p.stat().st_size == f.size
+
+
+def _bulk_chunks(files: list[Remote], max_n: int = 300, max_bytes: int = 1 << 30) -> list[list[Remote]]:
+    out: list[list[Remote]] = []
+    n = 0
+    for f in files:
+        if not out or len(out[-1]) >= max_n or n + f.size > max_bytes:
+            out.append([])
+            n = 0
+        out[-1].append(f)
+        n += f.size
+    return out
+
+
+def dv_bulk(files: list[Remote], src: Path) -> list[Remote]:
+    """Downloads Dataverse files a zip at a time (/api/access/datafiles/<ids>, original formats).
+    Returns the files the zips did not deliver intact (left out for the zip size limit, which
+    MANIFEST.TXT lists, or failed): they are fetched one by one."""
+    left: list[Remote] = []
+    for chunk in _bulk_chunks(files):
+        if len(chunk) == 1:
+            left += chunk
+            continue
+        tmp = src.parent / f"_bulk{threading.get_ident()}.zip"
+        got: set[PurePosixPath] = set()
+        try:
+            net.download(f"{DATAVERSE}/api/access/datafiles/{','.join(str(f.dv_id) for f in chunk)}"
+                         "?format=original", tmp)
+            want = {f.rel: f for f in chunk}
+            with zipfile.ZipFile(tmp) as z:
+                for info in z.infolist():
+                    rel = _safe_rel(info.filename)
+                    f = want.get(rel) if rel is not None else None
+                    if f is None or rel in got or info.file_size != f.size:
+                        continue
+                    if _extract(z, info, src / rel, f.md5):
+                        got.add(rel)
+        except (zipfile.BadZipFile, OSError, RuntimeError, requests.RequestException):
+            pass  # whatever is missing is fetched one by one
+        finally:
+            tmp.unlink(missing_ok=True)
+            tmp.with_name(tmp.name + ".part").unlink(missing_ok=True)
+        left += [f for f in chunk if f.rel not in got]
+    return left
+
+
+def _extract(z: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path, md5: str | None = None) -> bool:
+    """Writes member info to dest; False (and nothing written) when md5 is given and differs."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    h = hashlib.md5()
+    with z.open(info) as s, open(part, "wb") as d:
+        while b := s.read(1 << 20):
+            d.write(b)
+            h.update(b)
+    if md5 and h.hexdigest() != md5.lower():
+        part.unlink()
+        return False
+    part.replace(dest)
+    return True
+
+
+def download_files(files: list[Remote], src: Path) -> int:
+    """Downloads the files not yet in src (Dataverse ones in bulk zips); returns their total size."""
+    todo = [f for f in files if not _present(src, f)]
+    bulk = [f for f in todo if f.dv_id is not None]
+    one = [f for f in todo if f.dv_id is None]
+    if bulk:
+        one += dv_bulk(bulk, src)
+    for f in one:
+        net.download(f.url, src / f.rel, md5=f.md5)
+    return sum(f.size for f in files)
+
+
+def fetch_listed(c: Candidate, src: Path) -> int:
+    return download_files(LISTERS[c.source](c), src)
+
+
+# ------------------------------------------------------------------------------- prescan
+
+SMALL_ARCHIVE = 32 << 20  # archives up to this size are downloaded whole for the prescan
+NESTED_MAX = 64 << 20  # nested archives up to this (compressed) size are read into memory
+
+
+class Undecided(Exception):
+    """The prescan cannot get every file scan reads without downloading the package."""
+
+
+def _zip_regions(z: zipfile.ZipFile, infos: list[zipfile.ZipInfo]) -> list[tuple[int, int]]:
+    """Byte regions holding members infos (local header estimated from the central one)."""
+    return [(i.header_offset, i.header_offset + 30 + len(i.orig_filename.encode()) + len(i.extra) + 64
+             + i.compress_size) for i in infos]
+
+
+def _prescan_archive(fobj, base: Path, depth: int) -> None:
+    """Writes the scan-relevant members of archive fobj (and of archives nested in it, down to
+    unpack_tree's depth) under base, where unpack_tree would put them."""
+    try:
+        z = zipfile.ZipFile(fobj)
+    except zipfile.BadZipFile:
+        if isinstance(fobj, net.RemoteFile):
+            raise Undecided("remote archive is not a zip")
+        try:
+            fobj.seek(0)
+            t = tarfile.open(fileobj=fobj)
+        except tarfile.TarError:
+            return  # unpack_tree leaves a broken archive as it is
+        with t:
+            for m in t.getmembers():
+                rel = _safe_rel(m.name)
+                if rel is None or not m.isfile():
+                    continue
+                if scan.relevant(rel.name) or (is_archive_name(rel.name) and depth < 3):
+                    data = t.extractfile(m).read()  # type: ignore[union-attr]
+                    if scan.relevant(rel.name):
+                        (base / rel).parent.mkdir(parents=True, exist_ok=True)
+                        (base / rel).write_bytes(data)
+                    else:
+                        _prescan_archive(io.BytesIO(data), (base / rel).parent, depth + 1)
+        return
+    with z:
+        members = [(i, _safe_rel(i.filename)) for i in z.infolist() if not i.is_dir()]
+        need = [(i, r) for i, r in members if r is not None and scan.relevant(r.name)]
+        nested = [(i, r) for i, r in members if r is not None and depth < 3 and is_archive_name(r.name)]
+        if any(i.compress_size > NESTED_MAX for i, _ in nested):
+            raise Undecided("large nested archive")
+        if isinstance(fobj, net.RemoteFile):
+            fobj.prefetch(_zip_regions(z, [i for i, _ in need + nested]))
+        for i, r in need:
+            _extract(z, i, base / r)
+        for i, r in nested:
+            _prescan_archive(io.BytesIO(z.read(i)), (base / r).parent, depth + 1)
+
+
+def prescan(c: Candidate) -> bool:
+    """Puts into src only the files scan reads: from the file list, plus the matching members of
+    archives (small ones downloaded, larger zips read remotely through byte ranges). True when
+    src then gives the same scan verdict as the full package; False (undecided) when it cannot
+    (no file list for the source, a tar or a large nested archive that would need downloading)."""
+    lister = LISTERS.get(c.source)
+    if lister is None:
+        return False
+    src = paths.pkg_dir(c.pkg) / "src"
+    files = lister(c)
+    arcs = [f for f in files if is_archive_name(f.rel.name)]
+    small = [f for f in arcs if f.size <= SMALL_ARCHIVE]
+    download_files([f for f in files if scan.relevant(f.rel.name)] + small, src)
+    try:
+        for f in arcs:
+            base = (src / f.rel).parent
+            if f in small:
+                with open(src / f.rel, "rb") as fh:
+                    _prescan_archive(fh, base, 1)
+            elif f.rel.name.lower().endswith(".zip"):
+                with net.RemoteFile(f.url) as rf:
+                    _prescan_archive(rf, base, 1)
+            else:
+                raise Undecided("large tar archive")
+    except (Undecided, net.RangeError):
+        return False
+    return True
 
 
 _icpsr: icpsr.Client | None = None
 _icpsr_failed: str | None = None
+_icpsr_lock = threading.Lock()
 
 
 def fetch_aea(c: Candidate, src: Path) -> int:
@@ -146,19 +338,20 @@ def fetch_aea(c: Candidate, src: Path) -> int:
     zipf = paths.inbox_aea() / f"{c.id}.zip"
     from_inbox = zipf.exists()
     if not from_inbox:
-        if _icpsr_failed is None:
-            try:
-                if _icpsr is None:
-                    _icpsr = icpsr.Client.from_env()
-                m = re.search(r"V(\d+)$", c.doi, re.I)
-                zipf = paths.pkg_dir(c.pkg) / "download.zip"
-                _icpsr.download(c.id, int(m.group(1)) if m else 1, zipf)
-            except icpsr.IcpsrError as e:
-                _icpsr_failed = str(e)
-                write_aea_shortlist()
-        if _icpsr_failed is not None:
-            raise FetchError(f"ICPSR: {_icpsr_failed}; put the zip in {paths.inbox_aea()}/{c.id}.zip "
-                             "(list: aea_shortlist.csv)")
+        with _icpsr_lock:
+            if _icpsr_failed is None:
+                try:
+                    if _icpsr is None:
+                        _icpsr = icpsr.Client.from_env()
+                    m = re.search(r"V(\d+)$", c.doi, re.I)
+                    zipf = paths.pkg_dir(c.pkg) / "download.zip"
+                    _icpsr.download(c.id, int(m.group(1)) if m else 1, zipf)
+                except icpsr.IcpsrError as e:
+                    _icpsr_failed = str(e)
+                    write_aea_shortlist()
+            if _icpsr_failed is not None:
+                raise FetchError(f"ICPSR: {_icpsr_failed}; put the zip in {paths.inbox_aea()}/{c.id}.zip "
+                                 "(list: aea_shortlist.csv)")
     src.mkdir(parents=True, exist_ok=True)
     n = unpack_archive(zipf, src)
     if not from_inbox:
@@ -184,7 +377,7 @@ def write_aea_shortlist(n: int = 80) -> Path:
     return out
 
 
-FETCHERS = {"dataverse": fetch_dataverse, "zenodo": fetch_zenodo, "aea": fetch_aea}
+FETCHERS = {"dataverse": fetch_listed, "zenodo": fetch_listed, "aea": fetch_aea}
 
 
 def fetch(c: Candidate, force: bool = False) -> dict:

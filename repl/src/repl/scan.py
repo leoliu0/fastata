@@ -6,9 +6,15 @@ from collections import Counter
 from pathlib import Path
 
 from . import paths, state
-from .stataparse import REPLACED, code_line_count, count_calls, find_master, logical_lines, read_text
+from .stataparse import REPLACED, code_line_count, count_calls, find_master, is_readme, logical_lines, read_text
 
 OTHER_LANGS = (".r", ".m", ".py", ".jl")
+
+
+def relevant(name: str) -> bool:
+    """True for the files scan_tree reads (its verdict depends on nothing else)."""
+    suf = Path(name).suffix.lower()
+    return suf in (".do", ".ado") or suf in OTHER_LANGS or is_readme(Path(name).name)
 
 
 def scan_tree(src: Path) -> dict:

@@ -79,6 +79,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--count-on", choices=["fast", "calls"], default="fast",
                    help="a package counts with >=1 fast call (default) or >=1 replaced-command call")
     p.add_argument("--workers", type=int, default=4, help="packages run at a time")
+    p.add_argument("--fetchers", type=int, default=6, help="packages fetched at a time (ahead of the runs)")
+    p.add_argument("--lookahead", type=int, help="eligible packages fetched ahead (default: --workers)")
+    p.add_argument("--fetch-only", action="store_true",
+                   help="only fetch and scan, until --target eligible packages are fetched")
     p.add_argument("--max-mb", type=float, default=discover.MAX_BYTES / 2**20, help="largest package (MB)")
     p.add_argument("--only", nargs="*", help="only these packages")
     p.add_argument("--keep-arms", action="store_true", help="keep arm directories after comparing")
@@ -119,9 +123,10 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "report":
         print(report.report(a.count_on))
     elif a.cmd == "pipeline":
-        n = pipeline.run(a.target, a.sources, a.count_on, a.workers, max_bytes=int(a.max_mb * 2**20),
-                         only=a.only, keep_arms=a.keep_arms, keep_src=a.keep_src, eager_b=a.eager_b,
-                         rediscover=a.rediscover, arms=a.arms)
+        n = pipeline.run(a.target, a.sources, a.count_on, a.workers, a.fetchers, a.lookahead,
+                         max_bytes=int(a.max_mb * 2**20), only=a.only, keep_arms=a.keep_arms,
+                         keep_src=a.keep_src, eager_b=a.eager_b, rediscover=a.rediscover, arms=a.arms,
+                         fetch_only=a.fetch_only)
         return 0 if n >= a.target else 1
     elif a.cmd == "reset":
         order = ["fetch", "scan", "prepare", "run_A", "run_V", "run_F", "run_A2", "run_B", "compare"]

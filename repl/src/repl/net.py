@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
+from contextlib import contextmanager
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Iterator
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -50,6 +53,36 @@ class _Limiter:
 
 _limiter = _Limiter()
 _local = threading.local()
+_counts: Counter[str] = Counter()
+_counts_lock = threading.Lock()
+
+
+def _count(host: str) -> None:
+    with _counts_lock:
+        _counts[host] += 1
+    t = getattr(_local, "track", None)
+    if t is not None:
+        t[host] += 1
+
+
+def counts() -> dict[str, int]:
+    """Requests sent so far by this process, per host (redirect targets included)."""
+    with _counts_lock:
+        return dict(_counts)
+
+
+@contextmanager
+def track() -> Iterator[Counter[str]]:
+    """Counts the requests this thread sends inside the block, per host."""
+    prev = getattr(_local, "track", None)
+    c: Counter[str] = Counter()
+    _local.track = c
+    try:
+        yield c
+    finally:
+        _local.track = prev
+        if prev is not None:
+            prev.update(c)
 
 
 def session() -> requests.Session:
@@ -61,7 +94,8 @@ def session() -> requests.Session:
     return s
 
 
-def get(url: str, *, params=None, stream=False, tries=6, timeout=120, sess=None) -> requests.Response:
+def get(url: str, *, params=None, stream=False, tries=6, timeout=120, sess=None, headers=None,
+        allow_redirects=True) -> requests.Response:
     """GET with back-off. Returns the final response (raises after the last try on errors)."""
     s = sess or session()
     host = urlparse(url).hostname or ""
@@ -69,13 +103,17 @@ def get(url: str, *, params=None, stream=False, tries=6, timeout=120, sess=None)
     last: Exception | None = None
     for attempt in range(tries):
         _limiter.wait(host)
+        _count(host)
         try:
-            r = s.get(url, params=params, stream=stream, timeout=timeout)
+            r = s.get(url, params=params, stream=stream, timeout=timeout, headers=headers,
+                      allow_redirects=allow_redirects)
         except requests.RequestException as e:
             last = e
             time.sleep(delay)
             delay *= 2
             continue
+        if getattr(r, "history", None):  # the redirect target (storage), not rate-limited here
+            _count(urlparse(r.url).hostname or "")
         if _throttled(r) or r.status_code >= 500:
             ra = r.headers.get("Retry-After")
             wait = float(ra) if ra and ra.isdigit() else max(delay, 60.0 if r.status_code == 403 else 0.0)
@@ -116,3 +154,112 @@ def download(url: str, dest: Path, *, md5: str | None = None, sess=None, tries: 
         part.replace(dest)
         return n
     raise RuntimeError(f"download failed: {url}")
+
+
+class RangeError(RuntimeError):
+    """The server does not answer byte-range requests."""
+
+
+_CRANGE = re.compile(r"bytes (\d+)-(\d+)/(\d+)")
+
+
+class RemoteFile:
+    """Seekable read-only file over HTTP range requests, enough for zipfile to list an archive
+    and read some members without downloading it. A redirect (Dataverse -> storage) is resolved
+    once. Fetched byte spans are kept; prefetch() loads several regions in merged requests."""
+
+    TAIL = 1 << 18  # the first request reads the end: the zip directory usually fits
+    MIN_READ = 1 << 16
+
+    def __init__(self, url: str):
+        self.url = url
+        self.spans: list[tuple[int, bytes]] = []
+        self.pos = 0
+        r = get(url, stream=True, allow_redirects=False, headers={"Range": f"bytes=-{self.TAIL}"})
+        if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+            self.url = urljoin(url, r.headers["Location"])
+            r.close()
+            r = get(self.url, stream=True, headers={"Range": f"bytes=-{self.TAIL}"})
+        start, body, total = self._body(r)
+        self.size = total
+        self._add(start, body)
+
+    def _body(self, r: requests.Response) -> tuple[int, bytes, int]:
+        try:
+            if r.status_code == 200:  # ranges ignored: accept only a small whole file
+                if int(r.headers.get("Content-Length") or 1 << 62) > self.TAIL:
+                    raise RangeError(f"no range support at {self.url}")
+                body = r.content
+                return 0, body, len(body)
+            if r.status_code != 206:
+                raise RangeError(f"{r.status_code} for a range request to {self.url}")
+            m = _CRANGE.match(r.headers.get("Content-Range", ""))
+            if not m:
+                raise RangeError(f"no Content-Range from {self.url}")
+            return int(m.group(1)), r.content, int(m.group(3))
+        finally:
+            r.close()
+
+    def _add(self, start: int, body: bytes) -> None:
+        self.spans.append((start, body))
+
+    def _fetch(self, start: int, end: int) -> None:
+        """Loads bytes [start, end)."""
+        r = get(self.url, stream=True, headers={"Range": f"bytes={start}-{end - 1}"})
+        s, body, _ = self._body(r)
+        if s != start or not body:
+            raise RangeError(f"unexpected range answer from {self.url}")
+        self._add(s, body)
+
+    def _cached(self, start: int, n: int) -> bytes | None:
+        for s, b in self.spans:
+            if s <= start and start + n <= s + len(b):
+                return b[start - s:start - s + n]
+        return None
+
+    def prefetch(self, regions: list[tuple[int, int]], gap: int = 1 << 20) -> None:
+        """Loads regions [start, end) in as few requests as possible: regions closer than gap
+        bytes are read together."""
+        merged: list[list[int]] = []
+        for s, e in sorted((max(0, s), min(self.size, e)) for s, e in regions):
+            if e <= s or self._cached(s, e - s) is not None:
+                continue
+            if merged and s - merged[-1][1] <= gap:
+                merged[-1][1] = max(merged[-1][1], e)
+            else:
+                merged.append([s, e])
+        for s, e in merged:
+            self._fetch(s, e)
+
+    def read(self, n: int = -1) -> bytes:
+        n = self.size - self.pos if n is None or n < 0 else min(n, self.size - self.pos)
+        if n <= 0:
+            return b""
+        b = self._cached(self.pos, n)
+        if b is None:
+            self._fetch(self.pos, min(self.size, self.pos + max(n, self.MIN_READ)))
+            b = self._cached(self.pos, n)
+            if b is None:  # a short answer: return what it covers
+                s, body = self.spans[-1]
+                b = body[self.pos - s:self.pos - s + n]
+        self.pos += len(b)
+        return b
+
+    def seek(self, off: int, whence: int = 0) -> int:
+        self.pos = off if whence == 0 else self.pos + off if whence == 1 else self.size + off
+        return self.pos
+
+    def tell(self) -> int:
+        return self.pos
+
+    def seekable(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.spans = []
+
+    def __enter__(self) -> "RemoteFile":
+        return self
+
+    def __exit__(self, *a) -> None:
+        self.close()
