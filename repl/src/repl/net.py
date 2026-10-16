@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections import Counter, deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -132,10 +133,24 @@ def get_json(url: str, params=None):
     return r.json()
 
 
-def download(url: str, dest: Path, *, md5: str | None = None, sess=None, tries: int = 4) -> int:
-    """Streams url to dest (through dest.part); checks md5 when given. Returns the byte count."""
+SEGMENT = 16 << 20  # files of at least two segments are downloaded in parallel byte ranges
+MAX_SEGMENTS = 16
+# Range connections in flight (all downloads): Zenodo serves ~0.25 MB/s per connection and
+# scales with connections (16 gave 3.7 MB/s).
+_segment_slots = threading.BoundedSemaphore(48)
+
+
+def download(url: str, dest: Path, *, md5: str | None = None, sess=None, tries: int = 4,
+             size: int | None = None) -> int:
+    """Streams url to dest (through dest.part); checks md5 when given. Returns the byte count.
+    With size given and large, the file comes in parallel byte ranges when the server allows."""
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    if size is not None and size >= 2 * SEGMENT and sess is None:
+        try:
+            return _download_segments(url, dest, part, size, md5)
+        except (RangeError, requests.RequestException, OSError, RuntimeError):
+            part.unlink(missing_ok=True)  # one stream instead
     for attempt in range(tries):
         r = get(url, stream=True, sess=sess, timeout=600)
         r.raise_for_status()
@@ -154,6 +169,56 @@ def download(url: str, dest: Path, *, md5: str | None = None, sess=None, tries: 
         part.replace(dest)
         return n
     raise RuntimeError(f"download failed: {url}")
+
+
+def _download_segments(url: str, dest: Path, part: Path, size: int, md5: str | None) -> int:
+    r = get(url, stream=True, allow_redirects=False, headers={"Range": "bytes=0-0"})
+    final = url
+    if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+        final = urljoin(url, r.headers["Location"])  # storage (Dataverse): resolved once
+    elif r.status_code != 206:
+        r.close()
+        raise RangeError(f"{r.status_code} for a range request to {url}")
+    r.close()
+    n = min(MAX_SEGMENTS, -(-size // SEGMENT))
+    cuts = [size * i // n for i in range(n + 1)]
+    with open(part, "wb") as f:
+        f.truncate(size)
+
+    def one(a: int, b: int) -> None:
+        with _segment_slots:
+            for _ in range(4):
+                try:
+                    r = get(final, stream=True, timeout=600, headers={"Range": f"bytes={a}-{b - 1}"})
+                    try:
+                        m = _CRANGE.match(r.headers.get("Content-Range", ""))
+                        if r.status_code != 206 or not m or int(m.group(1)) != a:
+                            raise RangeError(f"no range support at {final}")
+                        with open(part, "r+b") as f:
+                            f.seek(a)
+                            for chunk in r.iter_content(1 << 20):
+                                f.write(chunk[:b - a])
+                                a += min(len(chunk), b - a)
+                    finally:
+                        r.close()
+                except requests.RequestException:
+                    pass  # resume the segment where it stopped
+                if a >= b:
+                    return
+        raise RuntimeError(f"segment of {url} incomplete")
+
+    with ThreadPoolExecutor(n) as ex:
+        for fu in [ex.submit(one, cuts[i], cuts[i + 1]) for i in range(n)]:
+            fu.result()
+    if md5:
+        h = hashlib.md5()
+        with open(part, "rb") as f:
+            while b := f.read(1 << 20):
+                h.update(b)
+        if h.hexdigest() != md5.lower():
+            raise RuntimeError(f"md5 mismatch for {url}")
+    part.replace(dest)
+    return size
 
 
 class RangeError(RuntimeError):

@@ -18,9 +18,10 @@ from repl.discover import Candidate, write_candidates
 
 
 class Server:
-    """Serves files[path] with byte ranges; /redir/<p> answers 303 to /files/<p>;
-    /api/access/datafiles/<ids> zips the files dv[id] = (name, bytes), leaving out skip_ids and
-    corrupting bad_ids; /api/access/datafile/<id> serves one."""
+    """Serves files[path] at /files/<path> with byte ranges and at /plain/<path> without;
+    /redir/<p> answers 303 to /files/<p>; /api/access/datafiles/<ids> zips the files
+    dv[id] = (name, bytes), leaving out skip_ids and corrupting bad_ids; /api/access/datafile/<id>
+    serves one. log holds the paths asked for, ranges the Range headers."""
 
     def __init__(self):
         self.files: dict[str, bytes] = {}
@@ -28,6 +29,7 @@ class Server:
         self.skip_ids: set[int] = set()
         self.bad_ids: set[int] = set()
         self.log: list[str] = []
+        self.ranges: list[str] = []
         srv = self
 
         class H(BaseHTTPRequestHandler):
@@ -57,15 +59,18 @@ class Server:
                     return self._send(buf.getvalue())
                 if path.startswith("/api/access/datafile/"):
                     return self._send(srv.dv[int(path.rsplit("/", 1)[1])][1])
-                body = srv.files.get(path.removeprefix("/files"))
+                plain = path.startswith("/plain/")
+                body = srv.files.get(path.removeprefix("/plain" if plain else "/files"))
                 if body is None:
                     self.send_response(404)
                     self.end_headers()
                     return
-                self._send(body)
+                self._send(body, ranges=not plain)
 
-            def _send(self, body: bytes):
-                rng = self.headers.get("Range")
+            def _send(self, body: bytes, ranges: bool = True):
+                rng = self.headers.get("Range") if ranges else None
+                if rng:
+                    srv.ranges.append(rng)
                 if not rng:
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
@@ -283,3 +288,16 @@ def test_fetch_only_pipeline_skips_ineligible_downloads(srv, root, monkeypatch):
     srv.log.clear()
     assert pipeline.run(5, ["zenodo"], fetch_only=True, fetchers=2, log=lambda m: None) == 1
     assert srv.log == []
+
+
+@pytest.mark.parametrize("prefix,segmented", [("/redir/", True), ("/files/", True), ("/plain/", False)])
+def test_segmented_download(srv, tmp_path, monkeypatch, prefix, segmented):
+    monkeypatch.setattr(net, "SEGMENT", 1 << 20)
+    data = os.urandom((5 << 20) + 123)
+    srv.files["/big.bin"] = data
+    dest = tmp_path / "out" / "big.bin"
+    md5 = hashlib.md5(data).hexdigest()
+    assert net.download(srv.base + prefix + "big.bin", dest, md5=md5, size=len(data)) == len(data)
+    assert dest.read_bytes() == data and not dest.with_name("big.bin.part").exists()
+    parts = [r for r in srv.ranges if r != "bytes=0-0"]
+    assert len(parts) == (6 if segmented else 0)  # 5 MB + 123 bytes in 1 MB segments

@@ -1,10 +1,11 @@
 """repl fetch: download a package into ~/fastata-repl/pkgs/<source>-<id>/src/ and unpack archives.
 
-Dataverse: in zips of many files (/api/access/datafiles/<ids>?format=original: original formats of
-ingested tabular files), under directoryLabel, named originalFileName, md5-checked; files a zip
-leaves out are fetched one by one. Zenodo: per file, md5-checked. AEA (only when the aea source is
-requested): ICPSR login and project zip, else a zip the user put in inbox/aea/<projectid>.zip.
-Nested archives are unpacked in place (zip, tar), up to depth 3.
+Dataverse: files up to 16 MB in zips of many files (/api/access/datafiles/<ids>?format=original:
+original formats of ingested tabular files), larger ones one by one; under directoryLabel, named
+originalFileName, md5-checked; files a zip leaves out are fetched one by one. Zenodo: per file,
+md5-checked. Large files come in parallel byte ranges (net.download). AEA (only when the aea
+source is requested): ICPSR login and project zip, else a zip the user put in
+inbox/aea/<projectid>.zip. Nested archives are unpacked in place (zip, tar), up to depth 3.
 
 prescan() fetches only what scan reads (do-files, other-language code, READMEs), reading large
 zips remotely through byte ranges, so that packages scan rejects are never downloaded.
@@ -226,15 +227,20 @@ def _extract(z: zipfile.ZipFile, info: zipfile.ZipInfo, dest: Path, md5: str | N
     return True
 
 
+BULK_MAX_FILE = net.SEGMENT  # larger Dataverse files come one by one, in parallel byte ranges
+
+
 def download_files(files: list[Remote], src: Path) -> int:
-    """Downloads the files not yet in src (Dataverse ones in bulk zips); returns their total size."""
+    """Downloads the files not yet in src (small Dataverse ones in bulk zips); returns the total
+    size of files."""
     todo = [f for f in files if not _present(src, f)]
-    bulk = [f for f in todo if f.dv_id is not None]
-    one = [f for f in todo if f.dv_id is None]
+    small = [f.dv_id is not None and f.size <= BULK_MAX_FILE for f in todo]
+    bulk = [f for f, s in zip(todo, small) if s]
+    one = [f for f, s in zip(todo, small) if not s]
     if bulk:
         one += dv_bulk(bulk, src)
     for f in one:
-        net.download(f.url, src / f.rel, md5=f.md5)
+        net.download(f.url, src / f.rel, md5=f.md5, size=f.size)
     return sum(f.size for f in files)
 
 
