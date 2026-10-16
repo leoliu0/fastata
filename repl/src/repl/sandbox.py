@@ -33,6 +33,10 @@ def bwrap_cmd(argv: list[str], *, cwd: Path, home: Path, rw: list[Path], ro: lis
     cmd += ["--clearenv", "--setenv", "PATH", "/usr/local/bin:/usr/bin:/bin",
             "--setenv", "HOME", str(home), "--setenv", "TMPDIR", "/tmp",
             "--setenv", "LANG", os.environ.get("LANG", "C.UTF-8")]
+    # An installation whose launcher is a wrapper script (e.g. one adding a libcompat directory)
+    # runs with STATA=<real binary> and the wrapper's LD_LIBRARY_PATH, passed through here.
+    if os.environ.get("LD_LIBRARY_PATH"):
+        cmd += ["--setenv", "LD_LIBRARY_PATH", os.environ["LD_LIBRARY_PATH"]]
     for k, v in (env or {}).items():
         cmd += ["--setenv", k, v]
     cmd += ["--chdir", str(cwd), *argv]
