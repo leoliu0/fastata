@@ -18,7 +18,7 @@ program _fx_egen, byable(onecall)
 		capture error 0
 		* verify mode: the original on the snapshot taken by gate; its result is kept
 		if "`fx_vpend'" == "1" {
-			_fx verify egen `caller' `rc0' 0 0 `"`byv'"' `"`_byrc0'"' `fx_vtol' "" `"`0'"'
+			_fx verify egen `caller' `rc0' 0 0 `"`byv'"' `"`_byrc0'"' "`fx_vtol'" "" `"`0'"'
 			if `fx_vrc' exit `fx_vrc'
 		}
 		exit
@@ -462,18 +462,28 @@ program Fast
 		}
 		label var `name' `"Standardized values of `exp'"'
 	}
-	* verify mode: the accumulation-class tolerance (help fastata) for the comparison with the
-	* original, whose sums follow the random tie order of its sort by the by() variables
+	* verify mode: how the comparison with the original treats the new variable, "<tol> <name>":
+	* within tol, the accumulation-class tolerance (help fastata) for sums whose order follows
+	* the random tie order of the original's sort by the by() variables, and without the sign of
+	* a zero, which follows the random tie order of -0 and +0 in a sort when a by-group function
+	* selects a value (max and min after sorting unsorted data by the groups, median, pctile and
+	* iqr after sorting by groups and value); every other variable is compared bitwise
 	local vtol 0
-	if inlist("`fcn'", "total", "sum", "mean", "sd", "std") & "`by'" != "" {
+	local vzs 0
+	if "`by'" != "" {
 		local sb : sortedby
 		local head
 		local nb : word count `by'
 		forvalues i = 1/`nb' {
 			local head `head' `: word `i' of `sb''
 		}
-		if "`head'" != "`by'" local vtol = cond("`type'" == "double", 1e-13, 2^-23)
+		if inlist("`fcn'", "total", "sum", "mean", "sd", "std") & "`head'" != "`by'" {
+			local vtol = cond("`type'" == "double", 1e-13, 2^-23)
+		}
+		if inlist("`fcn'", "max", "min") & "`head'" != "`by'" local vzs 1
+		if inlist("`fcn'", "median", "pctile", "iqr") local vzs 1
 	}
+	if `vtol' > 0 | `vzs' local vtol `vtol' `name'
 	c_local fx_vtol `vtol'
 	c_local fx_done 1
 end

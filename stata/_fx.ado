@@ -22,10 +22,12 @@
 *!                                     version, by prefix, arguments, c(rc) rc0 at entry) from the
 *!                                     random-number states at gate, compares its result with the
 *!                                     fast path's (rspec: "name value" pairs of r() scalars; tol:
-*!                                     reldif for values, 0 bitwise), counts verify_ok,
-*!                                     verify_mismatch or verify_skipped, keeps the original's
-*!                                     data (and r(), c(rc), random-number states) and sets
-*!                                     fx_vrc to the original's return code
+*!                                     "<reldif> <variables>", the tolerance for those variables'
+*!                                     values, whose sign of zero is not compared, every other
+*!                                     variable bitwise; 0: all bitwise), counts
+*!                                     verify_ok, verify_mismatch or verify_skipped, keeps the
+*!                                     original's data (and r(), c(rc), random-number states)
+*!                                     and sets fx_vrc to the original's return code
 *! For fastata and the tests:
 *!   mode auto|original|verify         original: every replaced command runs its original;
 *!                                     verify: every fast path is checked against the original
@@ -127,7 +129,11 @@ program _fx
 			local dlf : data label
 			local fx_vdiff
 			if `frc' != `orc' local fx_vdiff "return code `frc' vs `orc'"
-			else quietly mata: _fx_vcompare("`fx_vframe'", `tol', st_local("rspec"))
+			else {
+				VHash `fx_vframe'
+				gettoken tolv tolvars : tol
+				quietly mata: _fx_vcompare("`fx_vframe'", `tolv', st_local("tolvars"), st_local("rspec"), st_local("fx_vhf"), st_local("fx_vho"))
+			}
 			if `"`fx_vdiff'"' == "" & `orc' == 0 & "`fleft'" != "" & "`fleft'" != "`fx_oleft'" {
 				local fx_vdiff "c(rc) left `fleft' vs `fx_oleft'"
 			}
@@ -309,6 +315,34 @@ program VRun
 		version `caller': `prog' `cargs'
 	}
 	c_local fx_oleft `=c(rc)'
+end
+
+* Verify mode: sets fx_vhf and fx_vho in the caller to the plugin's per-variable hashes (vhash) of
+* the current frame and of frame snap, or to "" where the plugin could not hash (no variables,
+* plugin unavailable); the comparison then reads every variable.
+program VHash
+	args snap
+	local threads = cond(c(MP), c(processors), 0)
+	foreach w in f o {
+		local fx_vh
+		if "`w'" == "o" {
+			frame `snap' {
+				VHash1 `threads'
+			}
+		}
+		else VHash1 `threads'
+		c_local fx_vh`w' `fx_vh'
+	}
+end
+
+program VHash1
+	args threads
+	local fx_vh
+	if c(k) {
+		capture _fx_call _all, vhash "threads=`threads'"
+		if _rc | `"`fx_fallback'"' != "" | "`fx_plugrc'" != "0" local fx_vh
+	}
+	c_local fx_vh `fx_vh'
 end
 
 version 16
@@ -761,32 +795,43 @@ string scalar _fx_vclean(string scalar s)
 
 // Metadata lines of the current frame: N, sortedby sb, data label dl, every variable (position,
 // name, type, format, value label, variable label), every characteristic (notes included) of
-// _dta and of the variables, and the definition of every value label in labs.
+// _dta and of the variables, and the definition of every value label in labs. Written into a
+// vector of the final size (appending line by line takes time quadratic in the number of
+// variables).
 string colvector _fx_vmeta(string scalar sb, string scalar dl, string rowvector labs)
 {
 	string colvector out, names, txt
 	string rowvector vars
 	real colvector vals
-	real scalar i, j
+	real scalar i, j, k, n, r
 
-	out = ("N " + strofreal(st_nobs(), "%20.0f")) \ ("sortedby " + sb) \ ("data label " + dl)
-	vars = st_nvar() ? st_varname(1..st_nvar()) : J(1, 0, "")
-	for (i = 1; i <= cols(vars); i++) {
-		out = out \ ("variable " + strofreal(i) + " " + vars[i] + " " + st_vartype(i) + " "
-			+ st_varformat(i) + " [" + st_varvaluelabel(i) + "] " + st_varlabel(i))
+	k = st_nvar()
+	vars = "_dta", (k ? st_varname(1..k) : J(1, 0, ""))
+	n = 3 + k
+	for (i = 1; i <= cols(vars); i++) n = n + rows(st_dir("char", vars[i], "*"))
+	for (i = 1; i <= cols(labs); i++) {
+		st_vlload(labs[i], vals, txt)
+		n = n + rows(vals)
 	}
-	vars = "_dta", vars
+	out = J(n, 1, "")
+	out[1] = "N " + strofreal(st_nobs(), "%20.0f")
+	out[2] = "sortedby " + sb
+	out[3] = "data label " + dl
+	r = 3
+	for (i = 1; i <= k; i++) {
+		out[++r] = ("variable " + strofreal(i) + " " + vars[i + 1] + " " + st_vartype(i) + " " +
+			st_varformat(i) + " [" + st_varvaluelabel(i) + "] " + st_varlabel(i))
+	}
 	for (i = 1; i <= cols(vars); i++) {
 		names = st_dir("char", vars[i], "*")
 		for (j = 1; j <= rows(names); j++) {
-			out = out \ ("char " + vars[i] + "[" + names[j] + "] "
-				+ st_global(vars[i] + "[" + names[j] + "]"))
+			out[++r] = "char " + vars[i] + "[" + names[j] + "] " + st_global(vars[i] + "[" + names[j] + "]")
 		}
 	}
 	for (i = 1; i <= cols(labs); i++) {
 		st_vlload(labs[i], vals, txt)
 		for (j = 1; j <= rows(vals); j++) {
-			out = out \ ("label " + labs[i] + " " + strofreal(vals[j], "%21x") + " " + txt[j])
+			out[++r] = "label " + labs[i] + " " + strofreal(vals[j], "%21x") + " " + txt[j]
 		}
 	}
 	return(out)
@@ -872,15 +917,21 @@ real scalar _fx_hasdup(real colvector v)
 // metadata (_fx_vmeta, with locals sbf, dlf, sbo, dlo), then values: strings and missing codes
 // exactly, numbers bitwise (the sign of zero included), or within reldif tol when tol > 0. rspec
 // lists "name value" pairs of the fast path's r() scalars, compared with r() as the original
-// left it. Sets local fx_vdiff to "" or a short description of the first difference.
-void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
+// left it. tol applies to the variables named in tolvars, and their sign of zero is not
+// compared (the original's follows a random sort tie order); every other variable is compared
+// bitwise. hf and ho: the plugin's per-variable hashes of the two frames (vhash; "" when the
+// plugin could not hash them); a variable with the same hash in both is bitwise equal and needs
+// no further comparison, every other one is compared in detail. Sets local fx_vdiff to "" or a
+// short description of the first difference.
+void _fx_vcompare(string scalar snap, real scalar tol0, string scalar tolvars,
+	string scalar rspec, string scalar hf, string scalar ho)
 {
 	string scalar cur, d
 	string colvector sa, sb
-	string rowvector rs
+	string rowvector rs, ha, hb, tv
 	real colvector a, b, ma, mb, z, nm, na, nb
 	real matrix rv
-	real scalar j, k, str
+	real scalar j, k, str, usehash, tol, zcheck
 
 	d = ""
 	rs = tokens(rspec)
@@ -904,7 +955,19 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 		d = _fx_vlinediff(sa, sb)
 	}
 	if (d == "") {
+		tv = tokens(tolvars)
+		ha = tokens(hf)
+		hb = tokens(ho)
+		usehash = (cols(ha) == st_nvar() & cols(hb) == st_nvar())
+		// Stata's count if (in _fx_vquick) sets r(): kept around the loop
+		stata("_return hold __fx_vq")
 		for (j = 1; j <= st_nvar(); j++) {
+			zcheck = !anyof(tv, st_varname(j))
+			tol = (zcheck ? 0 : tol0)
+			if (usehash) {
+				if (ha[j] == hb[j] & ha[j] != "-") continue
+				if (_fx_vquick(j, snap, tol, ha[j], hb[j])) continue
+			}
 			str = st_isstrvar(j)
 			if (str) sa = st_sdata(., j)
 			else a = st_data(., j)
@@ -919,7 +982,8 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 				nb = selectindex(b :!= b)
 				if (length(na) | length(nb)) {
 					if (length(na) != length(nb)) d = "NaN values of " + st_varname(j)
-					else if (na != nb | any(strofreal(a[na], "%21x") :!= strofreal(b[nb], "%21x"))) {
+					else if (na != nb) d = "NaN values of " + st_varname(j)
+					else if (_fx_vraw(a[na]) != _fx_vraw(b[nb])) {
 						d = "NaN values of " + st_varname(j)
 					}
 					else {
@@ -936,10 +1000,11 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 			else if (tol == 0) {
 				if (a != b) d = "values of " + st_varname(j) + " (" + strofreal(sum(a :!= b), "%20.0f") + " obs; first " +
 					_fx_vfirst(a :!= b, a, b) + ")"
-				else {
+				else if (zcheck) {
 					z = selectindex(a :== 0)
 					if (length(z)) {
-						if (any(strofreal(a[z], "%21x") :!= strofreal(b[z], "%21x"))) {
+						// (%21x shows -0 as +0)
+						if (_fx_vraw(a[z]) != _fx_vraw(b[z])) {
 							d = "sign of zero in " + st_varname(j)
 						}
 					}
@@ -965,8 +1030,43 @@ void _fx_vcompare(string scalar snap, real scalar tol, string scalar rspec)
 			}
 			if (d != "") break
 		}
+		stata("_return restore __fx_vq")
 	}
 	st_local("fx_vdiff", _fx_vclean(d))
+}
+
+// 1 when variable j of the current frame and of frame snap, whose plugin hashes (tokens ha, hb)
+// differ, still pass the comparison by a Stata count over both frames (_frval), which is much
+// faster than reading them into Mata: a string variable when every value has the same bytes (a
+// strL's too, binary ones included); a numeric variable, under tolerance tol > 0 and when
+// neither holds a NaN (which an expression reads as .), when every observation has the same
+// missing code in both or numbers within reldif tol. 0 sends the variable to the detailed
+// comparison, which finds and describes the difference.
+real scalar _fx_vquick(real scalar j, string scalar snap, real scalar tol, string scalar ha,
+	string scalar hb)
+{
+	string scalar v, f, cond
+
+	v = st_varname(j)
+	f = "_frval(" + snap + ", " + v + ", _n)"
+	if (st_isstrvar(j)) cond = v + " != " + f
+	else if (tol > 0 & substr(ha, -1, 1) != "n" & substr(hb, -1, 1) != "n") {
+		cond = ("!(" + v + " == " + f + " | (" + v + " < . & " + f + " < . & reldif(" + v + ", " +
+			f + ") <= " + strofreal(tol, "%21x") + "))")
+	}
+	else return(0)
+	if (_stata("quietly count if " + cond, 1)) return(0)
+	return(st_numscalar("r(N)") == 0)
+}
+
+// The 8 bytes of every value of x, as stored.
+string scalar _fx_vraw(real colvector x)
+{
+	string scalar s
+
+	s = (8 * rows(x)) * " "
+	bufput(bufio(), s, 0, "%8z", x)
+	return(s)
 }
 
 // "obs <i>" of the first observation flagged in diff, and for numbers "<fast> vs <original>"

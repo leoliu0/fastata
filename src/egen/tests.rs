@@ -402,3 +402,29 @@ fn a_nan_in_a_key_or_a_value_falls_back() {
     // A NaN in a variable the call does not use changes nothing.
     compute(&io, &spec(Fcn::Tag, Ty::Byte, vec![pg], vec![], None)).unwrap();
 }
+
+#[test]
+fn signed_zeros() {
+    // x: +0 then -0 in each of the two groups of key k (sorted)
+    let (p, m) = (0.0_f64, -0.0_f64);
+    let xv = vec![p, m, 3.0, p, m, MISS];
+    let kv = vec![1.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+    let mut io = MemIo::new(xv.len());
+    let (cx, ck) = (io.add_num(&xv), io.add_num(&kv));
+    let (x, k) = (io.push_var(cx), io.push_var(ck));
+    // median, pctile and iqr without by-groups fall back; with by-groups they run
+    for fcn in [Fcn::Median, Fcn::Pctile, Fcn::Iqr] {
+        let r = compute(&io, &spec(fcn, Ty::Double, vec![], vec![x], None));
+        assert!(r.err().is_some_and(|e| e.is_fallback() && e.msg == "signed zero"), "{fcn:?}");
+        compute(&io, &spec(fcn, Ty::Double, vec![k], vec![x], None)).unwrap();
+    }
+    // min: summarize keeps the first of -0 and +0 (no by-groups), _gmin the last (by-groups,
+    // missing)
+    let neg = |v: f64| v.is_sign_negative();
+    let nob = compute(&io, &spec(Fcn::Min, Ty::Double, vec![], vec![x], None)).unwrap().out;
+    assert!(!neg(nob[0]));
+    let by = compute(&io, &Spec { sorted: true, ..spec(Fcn::Min, Ty::Double, vec![k], vec![x], None) }).unwrap().out;
+    assert!(neg(by[0]) && neg(by[3]));
+    let mis = compute(&io, &Spec { missing: true, ..spec(Fcn::Min, Ty::Double, vec![], vec![x], None) }).unwrap().out;
+    assert!(neg(mis[0]));
+}

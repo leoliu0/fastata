@@ -91,11 +91,15 @@ pub fn std_value(x: f64, m: f64, s: f64, sd_opt: f64, mean_opt: f64, miss: f64) 
 }
 
 /// `max()`/`min()`: the extreme nonmissing value (`.` if none). With `missing`, missing values
-/// count as larger than every number and keep their codes (`.` < `.a` < ... < `.z`).
-pub fn extreme(xs: &[f64], miss: f64, max: bool, missing: bool) -> f64 {
+/// count as larger than every number and keep their codes (`.` < `.a` < ... < `.z`). Of equal
+/// values (only -0 and +0 differ in their bits), `summarize`'s `r(max)`/`r(min)` (no by-groups,
+/// no `missing`) is the first; `_gmax`'s and `_gmin`'s running comparison over the group in
+/// observation order (by-groups or `missing`) keeps the last.
+pub fn extreme(xs: &[f64], miss: f64, max: bool, missing: bool, by: bool) -> f64 {
+    let last = by || missing;
     let mut it = xs.iter().copied().filter(|&v| missing || v < miss);
     let Some(first) = it.next() else { return miss };
-    it.fold(first, |a, v| if (max && v > a) || (!max && v < a) { v } else { a })
+    it.fold(first, |a, v| if (max && v > a) || (!max && v < a) || (last && v == a) { v } else { a })
 }
 
 pub fn count(xs: &[f64], miss: f64) -> f64 {
@@ -218,14 +222,29 @@ mod tests {
     }
 
     #[test]
+    fn extremes_of_signed_zeros() {
+        let (p, m) = (0.0_f64, -0.0_f64);
+        let sign = |v: f64| v.is_sign_negative();
+        for max in [true, false] {
+            // summarize: the first; _gmax/_gmin (by-groups or missing): the last
+            assert!(!sign(extreme(&[p, m], MISS, max, false, false)));
+            assert!(sign(extreme(&[m, p], MISS, max, false, false)));
+            for (missing, by) in [(true, false), (false, true), (true, true)] {
+                assert!(sign(extreme(&[p, m], MISS, max, missing, by)));
+                assert!(!sign(extreme(&[m, p, MISS], MISS, max, missing, by)));
+            }
+        }
+    }
+
+    #[test]
     fn extremes_and_missing_codes() {
         let xs = [3.0, MISS, miss_a(), -1.0];
-        assert_eq!(extreme(&xs, MISS, true, false), 3.0);
-        assert_eq!(extreme(&xs, MISS, false, false), -1.0);
-        assert_eq!(extreme(&xs, MISS, true, true), miss_a());
-        assert_eq!(extreme(&xs, MISS, false, true), -1.0);
-        assert_eq!(extreme(&[miss_a()], MISS, true, false), MISS);
-        assert_eq!(extreme(&[miss_a(), MISS], MISS, false, true), MISS);
+        assert_eq!(extreme(&xs, MISS, true, false, false), 3.0);
+        assert_eq!(extreme(&xs, MISS, false, false, false), -1.0);
+        assert_eq!(extreme(&xs, MISS, true, true, false), miss_a());
+        assert_eq!(extreme(&xs, MISS, false, true, false), -1.0);
+        assert_eq!(extreme(&[miss_a()], MISS, true, false, false), MISS);
+        assert_eq!(extreme(&[miss_a(), MISS], MISS, false, true, false), MISS);
     }
 
     #[test]

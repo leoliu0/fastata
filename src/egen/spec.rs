@@ -31,7 +31,8 @@
 //! The arithmetic follows the original `_g<fcn>.ado` files (gated versions); the kernels document
 //! each rule. Input the fast path does not cover is a fallback: a string where a number is needed,
 //! a result that does not fit the storage type exactly, more than 2^32-1 observations, a binary
-//! strL key.
+//! strL key, both -0 and +0 among the values of `median`, `pctile` or `iqr` without by-groups
+//! (`_pctile` orders them as ties, in an order of its own) [signed zero].
 
 use crate::args::Args;
 use crate::error::{Error, Res};

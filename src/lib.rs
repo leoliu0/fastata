@@ -23,6 +23,7 @@ mod strnum;
 mod strprobe;
 #[cfg(test)]
 mod testutil;
+mod vhash;
 mod xtile;
 
 use args::Args;
@@ -129,6 +130,7 @@ fn run(argv: &[String]) -> Res<()> {
         "quant" => xtile::run(&spi, &a),
         "destring" => strnum::run_destring(&spi, &a),
         "tostring" => strnum::run_tostring(&spi, &a),
+        "vhash" => vhash::run(&spi, &a),
         c => Err(Error::syntax(format!("fastata plugin: unknown command `{c}`"))),
     }
 }

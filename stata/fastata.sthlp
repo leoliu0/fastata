@@ -118,7 +118,10 @@ documented stored results. There are three documented exceptions:
 1. The original commands sort the data internally, and Stata orders ties in a sort randomly.
 {cmd:fastata} does not sort, so a later command that depends on the order of ties (for
 example a {cmd:sort} with ties followed by {cmd:_n}) may give a different, equally valid
-order.
+order. For the same reason, when a variable holds both -0 and +0 (which only Mata or a plugin
+can store), the sign of a zero that {cmd:egen}'s {cmd:max}, {cmd:min}, {cmd:median},
+{cmd:pctile} or {cmd:iqr} returns within groups may differ: the original's follows the random
+order of these ties.
 
 {phang2}
 2. Results that commands not documented as storing results leave behind in {cmd:r()} (for

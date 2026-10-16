@@ -330,7 +330,22 @@ program rt_egen
 		}
 	}
 	c_local rt_tol `tol'
-	c_local rt_r
+	* the sign of a zero that a by-group function selects follows the random tie order of the
+	* original's sort: by the groups and the value (median, pctile, iqr), or by the groups, which
+	* reorders only data not sorted by them (max, min with by())
+	local zs 0
+	if "`keys'" != "" & inlist("`fn'", "median", "pctile", "iqr") local zs 1
+	if "`byo'" != "" & inlist("`fn'", "max", "min") {
+		local sb : sortedby
+		local nk : word count `keys'
+		local head
+		forvalues i = 1/`nk' {
+			local head `head' `: word `i' of `sb''
+		}
+		if "`head'" != "`keys'" local zs 1
+	}
+	if `zs' c_local rt_r zsfree(`nm')
+	else c_local rt_r
 end
 
 capture program drop rt_isid

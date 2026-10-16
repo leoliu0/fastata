@@ -43,12 +43,14 @@ frame bsz: sort gsz
 global TE_N 0
 global TE_NFAIL 0
 capture program drop te
-* te "<command>" fast|fallback [frame] [tol]
+* te "<command>" fast|fallback [frame] [tol] [names: fx_both's zsfree()]
 program te
-	args cmd kind frame tol
+	args cmd kind frame tol zs
 	if "`frame'" == "" local frame base
 	if "`tol'" == "" local tol 0
-	capture noisily fx_both `"`cmd'"', base(`frame') expect(egen `kind') tol(`tol')
+	local zsopt
+	if "`zs'" != "" local zsopt zsfree(`zs')
+	capture noisily fx_both `"`cmd'"', base(`frame') expect(egen `kind') tol(`tol') `zsopt'
 	if _rc {
 		global TE_NFAIL = $TE_NFAIL + 1
 		di as err `"TEST_EGEN FAIL: `cmd' [`frame']"'
@@ -64,6 +66,11 @@ foreach f of local exprfns {
 		foreach ty in "" double {
 			local acc = inlist("`f'", "total", "sum", "mean", "sd", "std")
 			local tol = cond(`acc', cond("`ty'" == "double", 1e-13, 1.2e-7), 0)
+			* xz holds -0 and +0: the sign of a zero that a by-group function selects follows
+			* the random tie order of the original's sort (by the groups and the value for
+			* median and iqr; by the groups, which reorders only unsorted data, for max and min)
+			local zss = cond(inlist("`f'", "median", "iqr"), "v", "")
+			local zsu = cond(inlist("`f'", "median", "iqr", "max", "min"), "v", "")
 			* no by
 			te "egen `ty' v = `f'(x1) `smp'" fast
 			* by prefix on sorted data, numeric and string keys: bitwise
@@ -72,12 +79,12 @@ foreach f of local exprfns {
 				te "by s: egen `ty' v = `f'(x1) `smp'" fast bs
 				te "by g s: egen `ty' v = `f'(xf) `smp'" fast bgs
 				te "by gsz: egen `ty' v = `f'(x1) `smp'" fast bsz
-				te "bysort gbig: egen `ty' v = `f'(xz) `smp'" fast
+				te "bysort gbig: egen `ty' v = `f'(xz) `smp'" fast base 0 `zss'
 			}
 			* by() on unsorted data
 			te "egen `ty' v = `f'(x1) `smp', by(g)" fast base `tol'
 			te "egen `ty' v = `f'(x2) `smp', by(sl)" fast base `tol'
-			te "egen `ty' v = `f'(xz) `smp', by(gm se)" fast base `tol'
+			te "egen `ty' v = `f'(xz) `smp', by(gm se)" fast base `tol' `zsu'
 			* by() on data sorted by the keys: bitwise
 			te "egen `ty' v = `f'(x1) `smp', by(g)" fast bg
 		}
@@ -115,7 +122,7 @@ foreach smp in "" "if u < .3" "in 1/12000" "if u < .3 in 1/12000" {
 	foreach p in 1 10 25 33.3 50 66.6667 90 99.5 {
 		te "egen v = pctile(x1) `smp', p(`p')" fast
 		te "egen v = pctile(x2) `smp', by(g) p(`p')" fast
-		if `byp' te "by gsz: egen double v = pctile(xz) `smp', p(`p')" fast bsz
+		if `byp' te "by gsz: egen double v = pctile(xz) `smp', p(`p')" fast bsz 0 v
 	}
 	te "egen v = pctile(x1) `smp'" fast
 	te "egen v = std(x1) `smp', mean(10) sd(2)" fast
@@ -462,6 +469,28 @@ te "egen v = group(nit) if nit < 0" fast big
 te "egen v = group(b1-b15)" fast big
 te "egen v = group(b1-b16)" fast big
 te "egen v = group(nit date_q)" fast big5
+
+* ---- -0 and +0 among the values (xz). _pctile orders them as ties in an order of its own:
+* median, pctile and iqr without by-groups fall back. Of equal max or min values, summarize (no
+* by-groups, no missing) returns the first, _gmax and _gmin (by-groups, missing) the last; on
+* data sorted by the groups that order is the data order
+te "egen v = median(xz) if xz == 0" fallback
+te "egen v = pctile(xz) in 1/300, p(30)" fallback
+te "egen v = iqr(xz)" fallback
+te "egen double v = median(xz) if xz != 0" fast
+te "egen double v = median(xz) if xz == 0, by(gbig)" fast base 0 v
+te "egen v = min(xz) if xz == 0" fast
+te "egen v = max(xz) if xz >= 0" fast
+te "egen v = max(xz) in 1/20000, missing" fast
+te "egen v = min(xz) in 2/30000, missing" fast
+te "egen v = max(xz) if xz == 0, by(g)" fast bg
+te "egen v = min(xz) if xz <= 0, by(g)" fast bg
+te "by g: egen double v = max(xz) if xz == 0" fast bg
+te "by g: egen v = min(xz), missing" fast bg
+te "egen double v = max(xz*x1), by(g) missing" fast bg
+te "egen double v = min(0*x1) if x1 < ., by(g)" fast bg
+te "by gsz: egen v = max(xz) if xz == 0" fast bsz
+te "egen v = max(xz) if xz == 0, by(g)" fast base 0 v
 
 if $TE_NFAIL {
 	di as err "TEST_EGEN failed: $TE_NFAIL of $TE_N specs (lines TEST_EGEN FAIL above)"

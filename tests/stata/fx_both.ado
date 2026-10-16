@@ -1,4 +1,4 @@
-*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback|any) nosortcheck nosmcl]
+*! fx_both "<command>" [, base(frame) tol(#) r(names) allr expect(<cmd> fast|fallback|any) nosortcheck nosmcl zsfree(names)]
 *! Runs <command> twice from the same state: in frame fa with fastata off (the original command
 *! runs) and in frame fb with fastata on, both on copies of frame base (default: base), both from
 *! the same sort seed and with r() cleared. Fails (r(9)) unless the two runs give
@@ -6,7 +6,8 @@
 *! - the same output, as captured by log using ..., text, and the same SMCL log (log using ...,
 *!   smcl: every style tag too, line by line; nosmcl skips it);
 *! - the same r() results named in r() (all r() results with allr);
-*! - the same data (fx_cmpframes; tolerance tol, default 0: bitwise).
+*! - the same data (fx_cmpframes; tolerance tol, default 0: bitwise; zsfree: variables whose
+*!   sign of zero is not compared).
 *! expect(cmd kind) also checks that the second run went through fastata's cmd as kind (fast or
 *! fallback; any: either, or neither when cmd is not reached in either run, e.g. a by prefix on
 *! unsorted data fails first) and that the first did not; the path taken comes back in local
@@ -15,7 +16,7 @@
 program fx_both
 	version 16
 	gettoken cmd 0 : 0
-	syntax [, Base(name) TOL(real 0) R(string) ALLR EXPect(string) noSORTcheck noSMCL]
+	syntax [, Base(name) TOL(real 0) R(string) ALLR EXPect(string) noSORTcheck noSMCL ZSfree(namelist)]
 	if "`base'" == "" local base base
 	gettoken ecmd ekind : expect
 	local ekind `ekind'
@@ -74,7 +75,9 @@ program fx_both
 	mata: _fxb_cmplogs(st_local("la"), st_local("lb"), st_local("cmd"), "output")
 	if "`smcl'" == "" mata: _fxb_cmplogs(st_local("sa"), st_local("sb"), st_local("cmd"), "SMCL log")
 	mata: _fxb_cmpr(st_local("r"), "`allr'" != "", st_local("cmd"))
-	fx_cmpframes fa fb, tol(`tol') what(`"`cmd'"') `sortcheck'
+	local zsopt
+	if "`zsfree'" != "" local zsopt zsfree(`zsfree')
+	fx_cmpframes fa fb, tol(`tol') what(`"`cmd'"') `sortcheck' `zsopt'
 end
 
 * Runs cmd in the current frame from sort seed 20261015 with r() cleared, logging its output

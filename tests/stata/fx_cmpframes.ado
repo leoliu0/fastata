@@ -1,4 +1,4 @@
-*! fx_cmpframes fa fb, tol(#) [what(text) nosortcheck noordercheck]
+*! fx_cmpframes fa fb, tol(#) [what(text) nosortcheck noordercheck zsfree(names)]
 *! Fails (r(9)) unless frames fa and fb hold the same data:
 *! - same N, same variables in the same order (unless noordercheck), same : sortedby (unless
 *!   nosortcheck);
@@ -6,11 +6,12 @@
 *! - same characteristics (notes included) of _dta and of every variable, and the same value-label
 *!   definitions;
 *! - values: identical missing patterns and missing codes, identical strings, and reldif <= tol
-*!   on nonmissing numbers. tol 0 demands bitwise-equal values. NaNs (a plugin or Mata can
-*!   store one) must have the same bits.
+*!   on nonmissing numbers. tol 0 demands bitwise-equal values (the sign of zero too). NaNs (a plugin or Mata can
+*!   store one) must have the same bits. zsfree: variables whose sign of zero is not compared
+*!   (it follows the random tie order of -0 and +0 in the original's sort).
 program fx_cmpframes
 	version 16
-	syntax namelist(min=2 max=2), tol(real) [what(string) noSORTcheck noORDERcheck]
+	syntax namelist(min=2 max=2), tol(real) [what(string) noSORTcheck noORDERcheck ZSfree(namelist)]
 	gettoken fa fb : namelist
 	local fb `fb'
 	local cur = c(frame)
@@ -59,7 +60,8 @@ program fx_cmpframes
 	}
 	mata: fx_cmpmeta("`fa'", "`fb'", `"`what'"')
 	foreach v of local va {
-		mata: fx_cmpvals("`fa'", "`fb'", "`v'", `tol', `"`what'"')
+		local zc = !`: list v in zsfree'
+		mata: fx_cmpvals("`fa'", "`fb'", "`v'", `tol', `"`what'"', `zc')
 	}
 end
 
@@ -114,11 +116,11 @@ void fx_cmpmeta(string scalar fa, string scalar fb, string scalar what)
 }
 
 void fx_cmpvals(string scalar fa, string scalar fb, string scalar v, real scalar tol,
-	string scalar what)
+	string scalar what, real scalar zcheck)
 {
 	string scalar cur
 	string colvector sa, sb
-	real colvector a, b, ma, mb, d, na, nb
+	real colvector a, b, ma, mb, d, na, nb, z
 	real scalar str, bad
 
 	cur = st_framecurrent()
@@ -142,7 +144,8 @@ void fx_cmpvals(string scalar fa, string scalar fb, string scalar v, real scalar
 	nb = selectindex(b :!= b)
 	if (length(na) | length(nb)) {
 		bad = length(na) != length(nb)
-		if (!bad) bad = na != nb | any(strofreal(a[na], "%21x") :!= strofreal(b[nb], "%21x"))
+		if (!bad) bad = na != nb
+		if (!bad) bad = _fxc_raw(a[na]) != _fxc_raw(b[nb])
 		if (bad) {
 			errprintf("%s: %s: NaN values differ\n", what, v)
 			exit(9)
@@ -168,5 +171,25 @@ void fx_cmpvals(string scalar fa, string scalar fb, string scalar v, real scalar
 		errprintf("%s: %s: max reldif %g > %g\n", what, v, max(d), tol)
 		exit(9)
 	}
+	// bitwise: the sign of zero too (%21x shows -0 as +0)
+	if (tol == 0 & zcheck) {
+		z = selectindex(a :== 0)
+		if (length(z)) {
+			if (_fxc_raw(a[z]) != _fxc_raw(b[z])) {
+				errprintf("%s: %s: sign of zero differs\n", what, v)
+				exit(9)
+			}
+		}
+	}
+}
+
+// The 8 bytes of every value of x, as stored.
+string scalar _fxc_raw(real colvector x)
+{
+	string scalar s
+
+	s = (8 * rows(x)) * " "
+	bufput(bufio(), s, 0, "%8z", x)
+	return(s)
 }
 end
