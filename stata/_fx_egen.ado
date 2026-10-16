@@ -402,6 +402,28 @@ program Fast
 	_fx store `fx_token' `otype' `name'
 
 	* ---- messages, labels and notes, as the original
+	* _ggroup.ado looks for the groups in a sample of the data (GroupFromSample) when the sample
+	* has an observation, _N > 50000, fewer than log2(_N) variables, no missing option and only
+	* numeric integer-valued keys among the sample's observations (its IsInteger). It does so in
+	* a non-quiet mata: line, which switches an SMCL log to {res} whatever the line finds; the
+	* same here, deliberately not quiet
+	if "`fcn'" == "group" & "`missing'" == "" & _N > 50000 & `fx_nmiss' < _N {
+		local nvar : list sizeof varlist
+		local sampled = `nvar' < ln(_N)/ln(2)
+		local cond !missing(`: subinstr local varlist " " ",", all')
+		if "`tu'" != "" local cond `tu' & `cond'
+		foreach v of local varlist {
+			if `sampled' {
+				local vt : type `v'
+				if substr("`vt'", 1, 3) == "str" local sampled 0
+				else if !inlist("`vt'", "byte", "int", "long") {
+					capture assert `v' == int(`v') if `cond', fast
+					if _rc local sampled 0
+				}
+			}
+		}
+		if `sampled' mata: (void) st_nobs()
+	}
 	if inlist("`fcn'", "median", "pctile", "iqr") & "`by'" == "" & "`fx_n'" == "0" {
 		* the original's _pctile prints this as text, not as an error
 		di as txt "no observations"

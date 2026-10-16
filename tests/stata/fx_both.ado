@@ -96,10 +96,15 @@ program _fxb_run
 	set sortseed 20261015
 	quietly log using `"`log'"', text name(_fxb) nomsg replace
 	quietly log using `"`slog'"', smcl name(_fxbs) nomsg replace
+	* a log continues in the style that was current when it was opened, often {res}; switching
+	* to {txt} first makes a switch to {res} (a non-quiet mata: line, ...) show in the log
+	display as txt "" _continue
 	_fxb_rclear
 	capture noisily `cmd'
 	local rc = _rc
-	mata: _fxb_rsave("`tag'")
+	* (quietly: a non-quiet mata: line would switch the SMCL log to {res} in both runs and hide
+	* a switch by the command)
+	quietly mata: _fxb_rsave("`tag'")
 	quietly log close _fxb
 	quietly log close _fxbs
 	c_local fxb_rc `rc'
