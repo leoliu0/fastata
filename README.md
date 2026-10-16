@@ -44,10 +44,11 @@ undocumented leftovers in `r()` are not reproduced; and `egen` sums, means and s
 within groups of unsorted data agree to a relative 1e-13 (one unit in the last place for float),
 because the original's own sums depend on the random order of ties in its internal sort.
 
-This is checked against the originals by 1,676 specifications across the seven commands, a
+This is checked against the originals by 1,838 specifications across the seven commands, a
 randomized test of 3,000 cases, bitwise calibrations of `_pctile`, `summarize`, `real()`,
-`compress` and `string()`, and published replication packages run with and without fastata
-([repl/RESULTS.md](repl/RESULTS.md)).
+`compress` and `string()`, and 100 published replication packages (QJE, JPE, REStat, RFS, REStud
+and EJ; [repl/RESULTS.md](repl/RESULTS.md)), each run without fastata and with fastata in verify
+mode: all 375,039 fast calls in them gave the original's results.
 
 ## Speed
 
