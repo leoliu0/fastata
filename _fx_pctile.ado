@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_pctile: fastata's pctile. Fast path: pctile [float|double] newvar = exp [if] [in]
 *! [aw fw pw] [, nquantiles(#) altdef] with the weight a numeric variable and nquantiles() up to
 *! 1001 (the plugin's quant command computes the percentiles; see src/xtile.rs). Every other
@@ -8,7 +8,14 @@ program _fx_pctile
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	_fx gate pctile
+	* small data (below 2000 observations, measured with bench/small.do): the original right away
+	* (see _fx gate)
+	_fx gate pctile `=c(N) < 2000'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	if `fx_ok' {
 		local fx_done 0
 		Fast `0'
@@ -24,8 +31,7 @@ program _fx_pctile
 			exit
 		}
 	}
-	_fx count pctile fallback `"`fx_why'"'
-	_fx orig pctile
+	_fx fallback pctile `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end
@@ -82,47 +88,65 @@ program Fast
 		c_local fx_why "exp"
 		exit
 	}
+	* state-dependent functions: s() and regexs()/ustrregexs()/regexcapture() (the last match of
+	* regexm()/ustrregexm()/regexmatch(), which this program's parsing calls)
+	local txt `"`p_exp' `p_if'"'
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs|regexcapture|regexcapturenamed)\s*\(") {
+		c_local fx_why "state"
+		exit
+	}
+	* random-number functions: a fallback after exp or if was evaluated puts the random-number
+	* state back, so that the original draws the same numbers
+	local rng
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
+		local rng = c(rngstate)
+	}
+	* pctile.ado reads exp as a variable when confirm variable accepts it (syntax leaves a blank
+	* after exp when if or in follows), else generates it; a list of variables (x1 x2) runs the
+	* original
 	tempvar touse x
 	local xv
-	if ustrregexm(`"`p_exp'"', "^[A-Za-z_][A-Za-z0-9_]*$") {
-		capture confirm variable `p_exp'
-		if !_rc {
-			capture confirm numeric variable `p_exp'
-			if _rc {
-				c_local fx_why "exp"
-				exit
-			}
-			unab xv : `p_exp'
+	capture confirm variable `p_exp'
+	if !_rc {
+		if !ustrregexm(`"`p_exp'"', "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$") {
+			c_local fx_why "exp"
+			exit
 		}
-	}
-	if "`xv'" == "" {
-		capture Gen6 `x' `p_exp'
+		local xn = ustrregexs(1)
+		capture confirm numeric variable `xn'
 		if _rc {
 			c_local fx_why "exp"
 			exit
 		}
-		local xv `x'
+		unab xv : `xn'
+	}
+	local why
+	if "`xv'" == "" {
+		capture Gen6 `x' `p_exp'
+		if _rc == 1 exit 1
+		if _rc local why "exp"
+		else local xv `x'
 	}
 	local hastouse 0
-	if `"`p_if'`p_in'"' != "" {
+	if "`why'" == "" & `"`p_if'`p_in'"' != "" {
 		capture Mark6 `touse' `p_if' `p_in'
-		if _rc {
-			c_local fx_why "error"
-			exit
-		}
-		local hastouse 1
+		if _rc == 1 exit 1
+		if _rc local why "error"
+		else local hastouse 1
 	}
-	local tv = cond(`hastouse', "`touse'", "")
-	quietly _fx threads
-	_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=pctile" /*
-		*/ "nq=`p_nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" /*
-		*/ "touse=`hastouse'" "float=`=("`p_typ'" == "float")'"
-	if `fx_plugrc' {
-		c_local fx_why `"plugin error r(`fx_plugrc')"'
-		exit
+	if "`why'" == "" {
+		local tv = cond(`hastouse', "`touse'", "")
+		local fx_threads = cond(c(MP), c(processors), 0)
+		_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=pctile" /*
+			*/ "nq=`p_nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" /*
+			*/ "touse=`hastouse'" "float=`=("`p_typ'" == "float")'"
+		if `fx_plugrc' == 1 exit 1
+		if `fx_plugrc' local why "plugin error r(`fx_plugrc')"
+		else if `"`fx_fallback'"' != "" local why `"`fx_fallback'"'
 	}
-	if `"`fx_fallback'"' != "" {
-		c_local fx_why `"`fx_fallback'"'
+	if `"`why'"' != "" {
+		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
+		c_local fx_why `"`why'"'
 		exit
 	}
 	capture drop `touse'

@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_xtile: fastata's xtile. Fast path: xtile newvar = exp [if] [in] [aw fw pw] [, nquantiles(#)
 *! altdef] with the weight a numeric variable and nquantiles() a plain integer up to 1001 (the
 *! plugin's quant command computes the percentiles and categories; see src/xtile.rs). Every
@@ -7,6 +7,8 @@ program _fx_xtile
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
+	* no small-data cutoff: xtile.ado calls pctile, so running the original from here pays two
+	* shims, and the fast path is faster than that at every size (bench/small.do)
 	_fx gate xtile
 	if `fx_ok' {
 		local fx_done 0
@@ -23,8 +25,7 @@ program _fx_xtile
 			exit
 		}
 	}
-	_fx count xtile fallback `"`fx_why'"'
-	_fx orig xtile
+	_fx fallback xtile `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end
@@ -90,41 +91,58 @@ program Fast
 		c_local fx_why "exp"
 		exit
 	}
+	* state-dependent functions: s() and regexs()/ustrregexs()/regexcapture() (the last match of
+	* regexm()/ustrregexm()/regexmatch(), which this program's parsing calls), and r() in exp
+	* when nquantiles() is given (xtile.ado runs count, which replaces r(), before it evaluates
+	* exp)
+	local txt `"`p_exp' `p_if'"'
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs|regexcapture|regexcapturenamed)\s*\(") /*
+		*/ | (`"`p_nq'"' != "" & ustrregexm(`"`p_exp'"', "(^|[^A-Za-z0-9_])r\s*\(")) {
+		c_local fx_why "state"
+		exit
+	}
+	* random-number functions: a fallback after exp or if was evaluated puts the random-number
+	* state back, so that the original draws the same numbers
+	local rng
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
+		local rng = c(rngstate)
+	}
+	* a variable name is read directly (syntax leaves a blank after exp when if or in follows)
 	local xv
-	if ustrregexm(`"`p_exp'"', "^[A-Za-z_][A-Za-z0-9_]*$") {
-		capture confirm numeric variable `p_exp'
+	if ustrregexm(`"`p_exp'"', "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$") {
+		local xn = ustrregexs(1)
+		capture confirm numeric variable `xn'
 		if !_rc {
-			unab xv : `p_exp'
+			unab xv : `xn'
 		}
 	}
 	tempvar touse x
 	local hastouse 0
+	local why
 	if `"`p_if'`p_in'"' != "" | "`xv'" == "" {
 		capture Mark6 `touse' `p_wt' `p_if' `p_in'
-		if _rc {
-			c_local fx_why "error"
-			exit
-		}
-		local hastouse 1
+		if _rc == 1 exit 1
+		if _rc local why "error"
+		else local hastouse 1
 	}
-	if "`xv'" == "" {
+	if "`why'" == "" & "`xv'" == "" {
 		capture Gen6 `x' `touse' `p_exp'
-		if _rc {
-			c_local fx_why "exp"
-			exit
-		}
-		local xv `x'
+		if _rc == 1 exit 1
+		if _rc local why "exp"
+		else local xv `x'
 	}
-	local tv = cond(`hastouse', "`touse'", "")
-	quietly _fx threads
-	_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=xtile" /*
-		*/ "nq=`nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" "touse=`hastouse'"
-	if `fx_plugrc' {
-		c_local fx_why `"plugin error r(`fx_plugrc')"'
-		exit
+	if "`why'" == "" {
+		local tv = cond(`hastouse', "`touse'", "")
+		local fx_threads = cond(c(MP), c(processors), 0)
+		_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=xtile" /*
+			*/ "nq=`nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" "touse=`hastouse'"
+		if `fx_plugrc' == 1 exit 1
+		if `fx_plugrc' local why "plugin error r(`fx_plugrc')"
+		else if `"`fx_fallback'"' != "" local why `"`fx_fallback'"'
 	}
-	if `"`fx_fallback'"' != "" {
-		c_local fx_why `"`fx_fallback'"'
+	if `"`why'"' != "" {
+		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
+		c_local fx_why `"`why'"'
 		exit
 	}
 	local type = cond(`fx_max' <= 100, "byte", cond(`fx_max' <= 32740, "int", "long"))

@@ -9,7 +9,7 @@ d Rust plugin (Linux, macOS, Windows).
 d
 d Author: Leo Liu, auleo.liu@gmail.com
 d License: MIT
-d Distribution-Date: 20261016
+d Distribution-Date: 20261017
 f fastata.ado
 f fastata_init.ado
 f fastata.sthlp

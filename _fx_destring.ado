@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_destring: fastata's destring. The fast path (caller 11 or later) converts every string
 *! variable in the plugin (src/strnum: the calibrated emulations of what destring.ado 2.4.4 does
 *! before and in real(), and of compress), then runs destring.ado's own commands and messages on
@@ -9,7 +9,14 @@ program _fx_destring
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	_fx gate destring
+	* small data (below 200 observations, measured with bench/small.do): the original right away
+	* (see _fx gate)
+	_fx gate destring `=c(N) < 200'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	if `fx_ok' {
 		local fx_why
 		if `caller' < 11 local fx_why caller
@@ -17,6 +24,7 @@ program _fx_destring
 			* the original's parsing and error checks; any error runs the original, which
 			* reports it
 			capture version `caller': Parse `0'
+			if _rc == 1 exit 1
 			if _rc local fx_why error
 		}
 		if "`fx_why'" == "" & _N == 0 local fx_why "no observations"
@@ -27,13 +35,19 @@ program _fx_destring
 				if !_rc local strvars `strvars' `var'
 			}
 			if "`strvars'" != "" {
-				_fx threads
+				local fx_threads = cond(c(MP), c(processors), 0)
 				_fx_call `strvars', destring "phase=compute" "threads=`fx_threads'" "force=`=("`force'"!="")'" "float=`=("`float'"!="")'" "percent=`=("`percent'"!="")'" "dpcomma=`=("`dpcomma'"!="")'" "ign=`codes'" "old=`=(`caller' < 14)'"
 				if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 				else if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			}
 		}
 		if "`fx_why'" == "" {
+			* c(rc) as destring.ado leaves it: its last capture is "capture drop" of a
+			* temporary variable it never creates (111) when the last variable is a string
+			* variable, "capture confirm string variable" (7) when it is numeric
+			local fx_lastrc 7
+			capture confirm string variable `: word `: word count `varlist'' of `varlist''
+			if !_rc local fx_lastrc 111
 			* the converted variables, in one store: under their final names for generate,
 			* under temporary names for replace
 			local j 0
@@ -51,133 +65,137 @@ program _fx_destring
 				local spec `spec' `fx_type_`j'' `new`j''
 				local names `names' `new`j''
 			}
-			if "`names'" != "" {
-				_fx store `fx_token' `spec'
-				* compress keeps the format of the double (float) destring generates
-				format `names' `=cond("`float'" != "", "%9.0g", "%10.0g")'
-			}
-			* destring.ado lines 134-346, with the plugin's results in place of its temporary
-			* variables
-			local j 0
-			local varno 0
-			foreach var of local varlist {
-				local varno = `varno' + 1
-				if "`generate'"!="" {
-					local finalvarname : word `varno' of `generate'
-					local finalprint "`finalvarname' "
+			* the store and everything destring.ado does to the new variables, as one step: a
+			* Break cannot leave variables without their labels, characteristics or position
+			nobreak {
+				if "`names'" != "" {
+					_fx store `fx_token' `spec'
+					* compress keeps the format of the double (float) destring generates
+					format `names' `=cond("`float'" != "", "%9.0g", "%10.0g")'
 				}
-				else {
-					local finalvarname "`var'"
-					local finalprint ""
-				}
-				capture confirm string variable `var'
-				if _rc != 0 {
-					di as txt "`var' already numeric; no " ///
-					  as res "`genrep'"
-					continue
-				}
-				local ++j
-				local flag `fx_flag_`j''
-				local newmiss `fx_newmiss_`j''
-				local b
-				local bcnt = 0
-				local k 0
-				foreach code of local codes {
-					local ++k
-					if `: word `k' of `fx_found_`j''' {
-						local t = char(`code')
-						if `"`t'"' == " " {
-							local b `"`b' space"'
-						}
-						else {
-							local b `"`b' `t'"'
-						}
-						local ++bcnt
-					}
-				}
-				if `flag' & ("`force'" == "") {
-					if `"`ignore'"' != "" {
-						di as txt "`var': contains " ///
-						  "`aswhat's not specified in " ///
-						  as res "ignore()" ///
-						  as txt "; no " as res "`genrep'"
+				* destring.ado lines 134-346, with the plugin's results in place of its temporary
+				* variables
+				local j 0
+				local varno 0
+				foreach var of local varlist {
+					local varno = `varno' + 1
+					if "`generate'"!="" {
+						local finalvarname : word `varno' of `generate'
+						local finalprint "`finalvarname' "
 					}
 					else {
-						di as txt "`var': contains " ///
-						  "nonnumeric `aswhat's; no " ///
+						local finalvarname "`var'"
+						local finalprint ""
+					}
+					capture confirm string variable `var'
+					if _rc != 0 {
+						di as txt "`var' already numeric; no " ///
 						  as res "`genrep'"
+						continue
 					}
-					continue
-				}
-				local NEWVAR `new`j''
-				order `NEWVAR', after(`var')
-				if `aschars' {
-					local dispb `"`b'"'
-				}
-				else {
-					local dispb = printablebytes(`"`b'"')
-				}
-				local c = ///
-				    plural(`bcnt',strproper("`aswhat'")) + ///
-				    " removed " + ///
-				    plural(`bcnt',"was","were") + `":`dispb'"'
-				local type : type `NEWVAR'
+					local ++j
+					local flag `fx_flag_`j''
+					local newmiss `fx_newmiss_`j''
+					local b
+					local bcnt = 0
+					local k 0
+					foreach code of local codes {
+						local ++k
+						if `: word `k' of `fx_found_`j''' {
+							local t = char(`code')
+							if `"`t'"' == " " {
+								local b `"`b' space"'
+							}
+							else {
+								local b `"`b' `t'"'
+							}
+							local ++bcnt
+						}
+					}
+					if `flag' & ("`force'" == "") {
+						if `"`ignore'"' != "" {
+							di as txt "`var': contains " ///
+							  "`aswhat's not specified in " ///
+							  as res "ignore()" ///
+							  as txt "; no " as res "`genrep'"
+						}
+						else {
+							di as txt "`var': contains " ///
+							  "nonnumeric `aswhat's; no " ///
+							  as res "`genrep'"
+						}
+						continue
+					}
+					local NEWVAR `new`j''
+					order `NEWVAR', after(`var')
+					if `aschars' {
+						local dispb `"`b'"'
+					}
+					else {
+						local dispb = printablebytes(`"`b'"')
+					}
+					local c = ///
+					    plural(`bcnt',strproper("`aswhat'")) + ///
+					    " removed " + ///
+					    plural(`bcnt',"was","were") + `":`dispb'"'
+					local type : type `NEWVAR'
 
-				if `flag' {
-					di as txt ///
-				    "`var': contains nonnumeric `aswhat's" ///
-				    _continue
-					if `"`ignore'"'!="" {
-						display " not specified in " ///
-						  as result "ignore()" _continue
+					if `flag' {
+						di as txt ///
+					    "`var': contains nonnumeric `aswhat's" ///
+					    _continue
+						if `"`ignore'"'!="" {
+							display " not specified in " ///
+							  as result "ignore()" _continue
+						}
+						if `"`b'"'=="" {
+							display "; `finalprint'" ///
+							  as res "`genrep'd " ///
+							  as txt "as " ///
+							  as res "`type'" _continue
+						}
+						display
 					}
-					if `"`b'"'=="" {
-						display "; `finalprint'" ///
+					if `"`b'"' != "" {
+						di as txt "`var': " ///
+						  plural(`bcnt',"`aswhat'") ///
+						  as res `"`dispb'"' ///
+						  as txt " removed; `finalprint'" ///
+						  as res "`genrep'd " as txt "as " ///
+						  as res "`type'"
+					}
+					else if `"`b'"' == "" & !`flag' {
+						di as txt ///
+						  "`var': all characters numeric; " ///
+						  "`finalprint'" ///
 						  as res "`genrep'd " ///
-						  as txt "as " ///
-						  as res "`type'" _continue
+						  as txt "as " as res "`type'"
 					}
-					display
-				}
-				if `"`b'"' != "" {
-					di as txt "`var': " ///
-					  plural(`bcnt',"`aswhat'") ///
-					  as res `"`dispb'"' ///
-					  as txt " removed; `finalprint'" ///
-					  as res "`genrep'd " as txt "as " ///
-					  as res "`type'"
-				}
-				else if `"`b'"' == "" & !`flag' {
-					di as txt ///
-					  "`var': all characters numeric; " ///
-					  "`finalprint'" ///
-					  as res "`genrep'd " ///
-					  as txt "as " as res "`type'"
-				}
 
-				if `newmiss' != 0 {
-					di as txt "(`newmiss' missing " ///
-					plural(`newmiss',"value") " generated)"
-				}
-				label variable `NEWVAR' ///
-					`"`: variable label `var''"'
-				char `NEWVAR'[destring] `c'
-				char `NEWVAR'[destring_cmd] ///
-					`"destring `cmdargs'"'
-				char `var'[destring]
-				char `var'[destring_cmd]
-				if "`genrep'"=="generate" {
-					Charcopy `var' `NEWVAR'
-					* destring.ado renames its new variable to the generate() name here.
-					* rename runs a non-quiet mata: line, which switches an SMCL log to
-					* {res}; the variable already has its name, so this reproduces only
-					* that (deliberately not quiet)
-					mata: (void) st_nvar()
-				}
-				else {
-					char rename `var' `NEWVAR'
-					drop `var'
-					rename `NEWVAR' `var'
+					if `newmiss' != 0 {
+						di as txt "(`newmiss' missing " ///
+						plural(`newmiss',"value") " generated)"
+					}
+					label variable `NEWVAR' ///
+						`"`: variable label `var''"'
+					char `NEWVAR'[destring] `c'
+					char `NEWVAR'[destring_cmd] ///
+						`"destring `cmdargs'"'
+					char `var'[destring]
+					char `var'[destring_cmd]
+					if "`genrep'"=="generate" {
+						Charcopy `var' `NEWVAR'
+						* destring.ado renames its new variable to the generate() name here.
+						* rename runs a non-quiet mata: line, which switches an SMCL log to
+						* {res}; the variable already has its name, so this reproduces only
+						* that (deliberately not quiet)
+						mata: (void) st_nvar()
+					}
+					else {
+						char rename `var' `NEWVAR'
+						drop `var'
+						rename `NEWVAR' `var'
+					}
 				}
 			}
 			_fx count destring fast
@@ -186,11 +204,11 @@ program _fx_destring
 				_fx verify destring `caller' `rc0' 0 "" "" "" 0 "" `"`0'"'
 				if `fx_vrc' exit `fx_vrc'
 			}
+			capture error `fx_lastrc'
 			exit
 		}
 	}
-	_fx count destring fallback `"`fx_why'"'
-	_fx orig destring
+	_fx fallback destring `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end

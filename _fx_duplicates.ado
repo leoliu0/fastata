@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_duplicates: fastata's duplicates. Fast path: the subcommands report, examples, list, tag
 *! and drop with the original's syntax, whenever the original would not fail; examples and list
 *! only with list options that do not name variables (see ListOK below). The plugin groups the
@@ -10,7 +10,18 @@ program _fx_duplicates, rclass
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'
-	_fx gate duplicates
+	* small data: the original right away (see _fx gate), below 500 observations for tag and
+	* 200 for the other subcommands (measured with bench/small.do)
+	gettoken fx_k : 0, parse(" ,")
+	local fx_k = cond(`"`fx_k'"' != "" & bsubstr("tag", 1, max(1, ustrlen(`"`fx_k'"'))) == `"`fx_k'"', 500, 200)
+	_fx gate duplicates `=c(N) < `fx_k''
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		capture noisily version `caller': `fx_prog' `0'
+		local rc = _rc
+		return add
+		exit `rc'
+	}
 	if `fx_ok' {
 		local fx_why
 		local sub
@@ -60,10 +71,22 @@ program _fx_duplicates, rclass
 			}
 			else local vartext "{res} `varlist'"
 		}
+		* state-dependent functions in if: s() and regexs()/ustrregexs()/regexcapture() (the last
+		* match of regexm()/ustrregexm()/regexmatch()) may differ between here and the original;
+		* random-number functions draw again when the original runs after marksample, so their
+		* state is put back first
+		local rng
+		if "`fx_why'" == "" & `"`if'"' != "" {
+			if ustrregexm(`"`if'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs|regexcapture|regexcapturenamed)\s*\(") local fx_why state
+			else if ustrregexm(`"`if'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
+				local rng = c(rngstate)
+			}
+		}
 		local tu 0
 		local tv
 		if "`fx_why'" == "" & `"`if'`in'"' != "" {
 			capture marksample touse, novarlist
+			if _rc == 1 exit 1
 			if _rc local fx_why syntax
 			else {
 				local tu 1
@@ -71,14 +94,23 @@ program _fx_duplicates, rclass
 			}
 		}
 		if "`fx_why'" == "" {
-			_fx threads
+			local fx_threads = cond(c(MP), c(processors), 0)
 			_fx_call `varlist' `tv', dup "phase=compute" "sub=`sub'" "touse=`tu'" "threads=`fx_threads'"
+			if `fx_plugrc' == 1 exit 1
 			if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			else if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 			else if `fx_n' == 0 local fx_why error
 			else if inlist("`sub'", "examples", "list") & "`c(type)'" == "float" {
 				if `fx_ndup' > 16777216 local fx_why "groups beyond float"
 			}
+		}
+		* report, examples and list display from a frame: create it before anything is printed
+		* (at most 100 frames may exist, and the original creates none)
+		if "`fx_why'" == "" & "`sub'" != "tag" & "`sub'" != "drop" {
+			tempname fr
+			capture frame create `fr'
+			if _rc == 1 exit 1
+			if _rc local fx_why frames
 		}
 		if "`fx_why'" == "" {
 			_fx count duplicates fast
@@ -90,7 +122,7 @@ program _fx_duplicates, rclass
 				format `generate' %12.0g
 			}
 			else if "`sub'" == "report" {
-				Report `"`fx_table'"' `c(obs_t)'
+				Report `fr' `"`fx_table'"' `c(obs_t)'
 				return scalar unique_value = `fx_nuniq'
 			}
 			else if "`sub'" == "drop" {
@@ -105,9 +137,17 @@ program _fx_duplicates, rclass
 				return scalar N_drop = `fx_ndrop'
 			}
 			else {
-				if `fx_ndup' == 0 di _n as txt "(0 observations are duplicates)"
-				else List `sub' `fx_token' `fx_ndup' `fx_nlist' `c(obs_t)' `c(type)' `"`varlist'"' `"`options'"'
+				if `fx_ndup' == 0 {
+					frame drop `fr'
+					di _n as txt "(0 observations are duplicates)"
+				}
+				else List `fr' `sub' `fx_token' `fx_ndup' `fx_nlist' `c(obs_t)' `c(type)' `"`varlist'"' `"`options'"'
 			}
+			* c(rc) as duplicates.ado leaves it: as it was (tag: 0, from its capture confirm new
+			* variable). The shim runs this program under capture, so it sets c(rc) again from
+			* fx_left.
+			local left = cond("`sub'" == "tag", 0, `rc0')
+			capture error `left'
 			* verify mode: the original on the snapshot taken by gate (without the sample
 			* marker, which the original never sees); its data are kept
 			if "`fx_vpend'" == "1" {
@@ -115,16 +155,17 @@ program _fx_duplicates, rclass
 				local rspec N `fx_n'
 				if "`sub'" == "report" local rspec `rspec' unique_value `fx_nuniq'
 				if "`sub'" == "drop" local rspec `rspec' N_drop `fx_ndrop'
-				_fx verify duplicates `caller' `rc0' 0 "" "" "" 0 "`rspec'" `"`cmdline'"'
+				_fx verify duplicates `caller' `rc0' 0 `left' "" "" 0 "`rspec'" `"`cmdline'"'
 				if `fx_vrc' exit `fx_vrc'
 			}
+			c_local fx_left `=c(rc)'
 			exit
 		}
-		* the original must see the data as the user left them
+		* the original must see the data as the user left them, and draw the same random numbers
 		if "`tv'" != "" drop `tv'
+		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
 	}
-	_fx count duplicates fallback `"`fx_why'"'
-	_fx orig duplicates
+	_fx fallback duplicates `"`fx_why'"'
 	local 0 `"`cmdline'"'
 	capture error `rc0'
 	* under capture, so that r() set by the original before an error (r(N) before error 2000)
@@ -144,12 +185,10 @@ program ListOK
 	c_local fx_listok = !_rc
 end
 
-* Displays the report table: one observation per group size in a frame, then the original's
-* tabdisp. Types are c(obs_t) of the data, as in the original.
+* Displays the report table: one observation per group size in frame fr (created empty by the
+* caller), then the original's tabdisp. Types are c(obs_t) of the data, as in the original.
 program Report
-	args table obst
-	tempname fr
-	frame create `fr'
+	args fr table obst
 	frame `fr' {
 		quietly set obs `= `: word count `table''/3'
 		foreach v in Ngroup freq surplus {
@@ -165,13 +204,14 @@ program Report
 end
 
 * Lists the duplicated observations (list) or one example per group (examples) as the original
-* does after sorting by group: the listed observations of varlist go to a frame, in listing
-* order, with the original's Group, # and observation-number columns.
+* does after sorting by group: the listed observations of varlist go to frame fr (created empty
+* by the caller, replaced here), in listing order, with the original's Group, # and
+* observation-number columns.
 program List
-	args sub token ndup nlist obst ctype varlist options
+	args fr sub token ndup nlist obst ctype varlist options
 	local main = c(frame)
-	tempname fr
 	tempvar order dgroup Ngroup
+	frame drop `fr'
 	frame put `varlist' in 1, into(`fr')
 	frame `fr' {
 		quietly set obs `nlist'

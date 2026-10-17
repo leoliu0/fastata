@@ -1,15 +1,23 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_isid: fastata's isid. Fast path: isid varlist [, sort missok] (not the using form) when
 *! no string key value starts or ends with a blank or a non-ASCII byte. The plugin counts the
 *! observations with a missing key and the distinct key tuples; the two errors of the original
 *! (missing key, key not unique) are raised here with the original's messages. Everything else
-*! runs the original.
+*! runs the original, right away below 100 observations (small data: there the original is
+*! faster than fastata's fixed cost per call; see _fx gate).
 program _fx_isid
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
+	* small data (below 100 observations, measured with bench/small.do): the original right away
+	* (see _fx gate)
+	_fx gate isid `=c(N) < 100'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	local cmdline `"`0'"'
-	_fx gate isid
 	if `fx_ok' {
 		local fx_why
 		foreach word of local 0 {
@@ -17,12 +25,14 @@ program _fx_isid
 		}
 		if "`fx_why'" == "" {
 			capture syntax varlist [, Sort Missok]
+			if _rc == 1 exit 1
 			if _rc local fx_why syntax
 		}
 		if "`fx_why'" == "" {
-			_fx threads
+			local fx_threads = cond(c(MP), c(processors), 0)
 			local mok = ("`missok'" != "")
 			_fx_call `varlist', isid "missok=`mok'" "threads=`fx_threads'"
+			if `fx_plugrc' == 1 exit 1
 			if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			else if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 		}
@@ -64,11 +74,15 @@ program _fx_isid
 				di as err `"`s(msg)' `does' not uniquely identify the observations"'
 			}
 			if `rc' exit `rc'
+			* c(rc) as the original leaves it on success: its last capture tests whether the last
+			* key is a string variable (7 when numeric; for a string, the assert after it gives 0).
+			* On the errors both end with _format_list's captures.
+			local last : word `: word count `varlist'' of `varlist'
+			capture confirm string variable `last'
 			exit
 		}
 	}
-	_fx count isid fallback `"`fx_why'"'
-	_fx orig isid
+	_fx fallback isid `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end
