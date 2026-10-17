@@ -1,5 +1,8 @@
 * stress_strread.do -- parallel string-read probe of the fastata plugin.
-* Run from tests/stata after scripts/build_plugin.sh:   stata-mp -b do stress_strread.do
+* strprobe is not in the shipped plugin: build it with the cargo feature probes first, and rebuild
+* without it afterwards (from the repository root):
+*   bash scripts/build_plugin.sh --features probes
+* then from tests/stata:   stata-mp -b do stress_strread.do
 *
 * Part 1: read throughput of strprobe over 2e7 obs (str20, strL, both): one thread against all.
 * Part 2: 200 reps of strprobe with all threads, each checksum compared with the one-thread

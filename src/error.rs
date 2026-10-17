@@ -66,3 +66,48 @@ pub fn vec_with_capacity<T>(cap: usize) -> Res<Vec<T>> {
     out.try_reserve_exact(cap).map_err(|_| Error::oom())?;
     Ok(out)
 }
+
+/// Element types whose all-zero bit pattern is a valid value (`0`, `0.0`, `false`).
+///
+/// # Safety
+/// Implement only for types where every zero byte pattern is a valid value.
+pub unsafe trait Zeroable: Copy {}
+unsafe impl Zeroable for f64 {}
+unsafe impl Zeroable for u8 {}
+unsafe impl Zeroable for u32 {}
+unsafe impl Zeroable for u64 {}
+unsafe impl Zeroable for usize {}
+unsafe impl Zeroable for bool {}
+
+/// `len` zeros, or r(909). Unlike [`vec_filled`] nothing is written here: the allocator hands
+/// out zeroed memory (fresh pages for large sizes), so a column is first touched by the worker
+/// threads that fill it, in parallel.
+pub fn vec_zeroed<T: Zeroable>(len: usize) -> Res<Vec<T>> {
+    if len == 0 || size_of::<T>() == 0 {
+        return Ok(Vec::new());
+    }
+    let layout = std::alloc::Layout::array::<T>(len).map_err(|_| Error::oom())?;
+    // SAFETY: the layout has a nonzero size; all-zero bytes are a valid T (Zeroable), and the
+    // allocation has exactly the layout of a Vec<T> with capacity len.
+    unsafe {
+        let p = std::alloc::alloc_zeroed(layout).cast::<T>();
+        if p.is_null() {
+            return Err(Error::oom());
+        }
+        Ok(Vec::from_raw_parts(p, len, len))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zeroed_vectors_are_zero_and_huge_ones_are_out_of_memory() {
+        let v: Vec<f64> = vec_zeroed(100_000).unwrap();
+        assert!(v.len() == 100_000 && v.iter().all(|x| x.to_bits() == 0));
+        assert!(vec_zeroed::<u32>(0).unwrap().is_empty());
+        assert_eq!(vec_zeroed::<f64>(usize::MAX / 4).unwrap_err().rc, 909);
+        assert_eq!(vec_with_capacity::<u64>(usize::MAX / 4).unwrap_err().rc, 909);
+    }
+}

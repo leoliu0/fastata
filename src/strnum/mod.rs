@@ -33,15 +33,20 @@
 
 pub mod real;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::args::Args;
-use crate::cache::{self, Output};
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
-use crate::io::{self, Io};
-use crate::par::{StoreMode, for_blocks};
+use crate::cache::{self, Output, StrCol};
+use crate::error::{Error, Res, vec_with_capacity, vec_zeroed};
+use crate::io::{self, Io, Rows};
+use crate::par::{StoreMode, for_blocks, for_chunks, threads_for_rows};
 
 use real::{Fmt, Range, Type};
 
 const BLOCK: usize = 8192;
+
+/// Longest [`real::int_string`] value: 19 digits and a sign.
+const INT_STR_MAX: usize = 20;
 
 #[derive(Clone, Debug, Default)]
 pub struct DestringOpts {
@@ -85,9 +90,8 @@ fn fb(reason: &'static str) -> Error {
     Error::fallback(reason)
 }
 
-/// One block of one variable: values (after `real()` and float rounding) and counts.
+/// Counts of one block of one variable (its values go straight into the output column).
 struct Part {
-    vals: Vec<f64>,
     found: Vec<bool>,
     oldmiss: usize,
     newmiss: usize,
@@ -108,15 +112,25 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
             return Err(Error::syntax("fastata plugin: destring expects string variables"));
         }
         let (buf, off) = read_strings(io, var)?;
-        if buf.iter().any(|&b| b >= 0x80) {
+        let threads = threads_for_rows(o.threads, n);
+        let nonascii = for_blocks(io, nb, threads, StoreMode::Parallel, |b, _emit| {
+            Ok(buf[off[b * BLOCK]..off[n.min((b + 1) * BLOCK)]].iter().any(|&c| c >= 0x80))
+        })?;
+        if nonascii.contains(&true) {
             return Err(fb("non-ASCII"));
         }
-        let parts = for_blocks(io, nb, o.threads, StoreMode::Serial, |b, _emit| {
+        let mut vals: Vec<f64> = vec_zeroed(n)?;
+        // calibration output: 1 where the emulation would fall back (the value is `.` there)
+        let mut flags: Vec<f64> = if o.raw > 0 { vec_zeroed(n)? } else { Vec::new() };
+        let mut cols: Vec<&mut [f64]> = vec![vals.as_mut_slice()];
+        if o.raw > 0 {
+            cols.push(flags.as_mut_slice());
+        }
+        let parts = for_chunks(io, &mut cols, BLOCK, threads, |b, ch| {
             let first = b * BLOCK;
-            let m = BLOCK.min(n - first);
-            let mut p = Part { vals: vec_filled(m, miss)?, found: vec![false; o.ignore.len()], oldmiss: 0, newmiss: 0 };
+            let mut p = Part { found: vec![false; o.ignore.len()], oldmiss: 0, newmiss: 0 };
             let mut t = Vec::new();
-            for r in 0..m {
+            for r in 0..ch[0].len() {
                 let s = &buf[off[first + r]..off[first + r + 1]];
                 if o.raw > 0 {
                     let s = if o.raw == 2 {
@@ -126,8 +140,8 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
                         s
                     };
                     let v = real::real(s, miss).and_then(|v| if o.float { real::to_float(v, miss) } else { Ok(v) });
-                    // NaN marks a value the emulation would fall back for
-                    p.vals[r] = v.unwrap_or(f64::NAN);
+                    ch[0][r] = v.unwrap_or(miss);
+                    ch[1][r] = if v.is_err() { 1.0 } else { 0.0 };
                     continue;
                 }
                 for (k, &c) in o.ignore.iter().enumerate() {
@@ -143,28 +157,22 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
                 }
                 p.oldmiss += usize::from(ismissing);
                 p.newmiss += usize::from(v >= miss);
-                p.vals[r] = v;
+                ch[0][r] = v;
             }
             Ok(p)
         })?;
+        drop(cols);
         drop(buf);
         drop(off);
-        let mut vals = vec_with_capacity(n)?;
         let mut found = vec![false; o.ignore.len()];
         let (mut oldmiss, mut newmiss) = (0, 0);
         for p in parts {
-            vals.extend_from_slice(&p.vals);
             found.iter_mut().zip(&p.found).for_each(|(f, &x)| *f |= x);
             oldmiss += p.oldmiss;
             newmiss += p.newmiss;
         }
         if o.raw > 0 {
-            let flags: Vec<f64> = vals.iter().map(|v| if v.is_nan() { 1.0 } else { 0.0 }).collect();
-            vals.iter_mut().for_each(|v| {
-                if v.is_nan() {
-                    *v = miss;
-                }
-            });
+            out.nums.try_reserve(2).map_err(|_| Error::oom())?;
             out.nums.push(vals);
             out.nums.push(flags);
             let typ = if o.float { Type::Float } else { Type::Double };
@@ -178,7 +186,7 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
             if o.percent && pct_pass.is_some_and(|k| found[k]) {
                 divide_by_100(&mut vals, miss, o.float)?;
             }
-            let ranges = for_blocks(io, nb, o.threads, StoreMode::Serial, |b, _emit| {
+            let ranges = for_blocks(io, nb, threads, StoreMode::Parallel, |b, _emit| {
                 let mut rg = Range::default();
                 vals[b * BLOCK..n.min((b + 1) * BLOCK)].iter().for_each(|&v| rg.add(v, miss));
                 Ok(rg)
@@ -186,6 +194,7 @@ pub fn destring_compute<I: Io>(io: &I, o: &DestringOpts) -> Res<(Output, Vec<Var
             let mut rg = Range::default();
             ranges.iter().for_each(|r| rg.merge(r));
             typ = real::compress_type(typ, &rg);
+            out.nums.try_reserve(1).map_err(|_| Error::oom())?;
             out.nums.push(vals);
         }
         infos.push(VarInfo { flag, conv, found, newmiss, typ });
@@ -253,41 +262,75 @@ pub fn run_destring<I: Io>(io: &I, a: &Args) -> Res<()> {
     Ok(())
 }
 
+/// One block of one variable in the tostring compute phase.
+enum ToStr {
+    /// The values, each followed by a NUL byte, and the longest length.
+    Strs(Vec<u8>, usize),
+    /// A NaN value (the fallback for NaN wins over the one for non-integers).
+    Nan,
+    /// A value that is not an integer within the format's digit bound.
+    NonInt,
+    /// Not formatted: another block already holds a non-integer.
+    Skipped,
+}
+
 /// The tostring compute phase without the SPI side effects: the cached strings and the longest
 /// value of each variable.
 pub fn tostring_compute<I: Io>(io: &I, fmt: Fmt, threads: usize) -> Res<(Output, Vec<usize>)> {
     let n = io.nobs();
     let miss = io.missval();
     let nb = n.div_ceil(BLOCK);
+    let threads = threads_for_rows(threads, n);
     let mut out = Output::default();
     let mut lens = Vec::new();
     for var in 1..=io.nvars() as i32 {
         if io.is_str(var) {
             return Err(Error::syntax("fastata plugin: tostring expects numeric variables"));
         }
-        let col = cache::read_cols(io, &[var], threads)?.pop().unwrap_or_default();
-        // string() shows a NaN as "-"; the integer formatter would reject it as non-integer
-        crate::nan::check(&col)?;
-        let parts = for_blocks(io, nb, threads, StoreMode::Serial, |b, _emit| {
+        let nonint = AtomicBool::new(false);
+        let parts = for_blocks(io, nb, threads, StoreMode::Parallel, |b, _emit| {
             let first = b * BLOCK;
             let m = BLOCK.min(n - first);
-            let mut strs: Vec<Vec<u8>> = vec_with_capacity(m)?;
-            let mut len = 0;
-            for &v in &col[first..first + m] {
-                let mut s = Vec::with_capacity(20);
-                real::int_string(v, miss, fmt, &mut s).map_err(|_| fb("non-integer"))?;
-                len = len.max(s.len());
-                strs.push(s);
+            let mut x: Vec<f64> = vec_zeroed(m)?;
+            io.read_block(&[var], Rows::Range { first, n: m }, &mut x)?;
+            // string() shows a NaN as "-"; the integer formatter would reject it as non-integer
+            if x.iter().any(|v| v.is_nan()) {
+                return Ok(ToStr::Nan);
             }
-            Ok((strs, len))
+            if nonint.load(Ordering::Relaxed) {
+                return Ok(ToStr::Skipped);
+            }
+            let mut scratch = vec_with_capacity(m * (INT_STR_MAX + 1))?;
+            let mut len = 0;
+            for &v in &x {
+                let at = scratch.len();
+                if real::int_string(v, miss, fmt, &mut scratch).is_err() {
+                    nonint.store(true, Ordering::Relaxed);
+                    return Ok(ToStr::NonInt);
+                }
+                len = len.max(scratch.len() - at);
+                scratch.push(0);
+            }
+            let mut chunk = vec_with_capacity(scratch.len())?;
+            chunk.extend_from_slice(&scratch);
+            Ok(ToStr::Strs(chunk, len))
         })?;
-        let mut strs = vec_with_capacity(n)?;
-        let mut len = 0;
-        for (s, l) in parts {
-            strs.extend(s);
-            len = len.max(l);
+        if parts.iter().any(|p| matches!(p, ToStr::Nan)) {
+            return Err(crate::nan::fallback());
         }
-        out.strs.push(strs);
+        if nonint.load(Ordering::Relaxed) {
+            return Err(fb("non-integer"));
+        }
+        let mut chunks = vec_with_capacity(parts.len())?;
+        let mut len = 0;
+        for p in parts {
+            if let ToStr::Strs(c, l) = p {
+                chunks.push(c);
+                len = len.max(l);
+            }
+        }
+        out.strs.try_reserve(1).map_err(|_| Error::oom())?;
+        out.strs.push(StrCol::from_chunks(chunks, n));
         lens.push(len);
     }
     Ok((out, lens))
@@ -463,9 +506,10 @@ mod tests {
         let (o4, l4) = tostring_compute(&io, Fmt::G(12), 4).unwrap();
         assert_eq!(o1, o4);
         assert_eq!(l1, l4);
+        assert_eq!(o1.strs[0].iter().count(), n);
         for (i, s) in o1.strs[0].iter().enumerate() {
             let want = if i % 11 == 0 { ".a".to_string() } else if i % 13 == 0 { ".".to_string() } else { format!("{}", i as i64 * 37 - 9000) };
-            assert_eq!(s, want.as_bytes());
+            assert_eq!(s.to_bytes(), want.as_bytes());
         }
         assert_eq!(l1[0], format!("{}", (n as i64 - 1) * 37 - 9000).len());
         let mut io = MemIo::new(2);
