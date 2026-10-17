@@ -1,6 +1,6 @@
 """What package code (untrusted) can make the harness do on the host: read through links it
 leaves in arm directories, get text into the published report, or reach other processes from
-the sandbox."""
+the sandbox. Also: a sandbox that could not start Stata at all."""
 
 import json
 import os
@@ -133,3 +133,14 @@ def test_network_sandbox_still_resolves_names(tmp_path):
         pytest.skip("no name resolution on this host")
     cmd = sandbox.bwrap_cmd(["getent", "hosts", host], cwd=tmp_path, home=tmp_path, rw=[tmp_path], network=True)
     assert subprocess.run(cmd, capture_output=True, timeout=60).returncode == 0
+
+
+def test_stata_batch_refuses_a_launcher_script(tmp_path, monkeypatch):
+    # the sandbox shows the launcher's directory only, so the Stata it execs would be missing
+    launcher = tmp_path / "bin" / "stata-mp"
+    launcher.parent.mkdir()
+    launcher.write_text('#!/bin/sh\nexec /opt/stata19/stata-mp "$@"\n')
+    launcher.chmod(0o755)
+    monkeypatch.setenv("STATA", str(launcher))
+    with pytest.raises(SystemExit, match="launcher script"):
+        sandbox.stata_batch(tmp_path / "x.do", cwd=tmp_path, home=tmp_path / "h", rw=[tmp_path])

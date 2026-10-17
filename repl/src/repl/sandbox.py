@@ -96,7 +96,14 @@ def run(cmd: list[str], timeout: float, stdout_path: Path | None = None) -> Resu
 def stata_batch(dofile: Path, *, cwd: Path, home: Path, rw: list[Path], ro: list[Path] = (),
                 env: dict[str, str] | None = None, network: bool = False, timeout: float = 3600) -> Result:
     """stata-mp -b do <dofile> in the sandbox; the log is <cwd>/<dofile stem>.log."""
+    stata = paths.stata_binary()
+    # the sandbox shows only the binary's own directory: a launcher script would exec a Stata it
+    # cannot see, and every run would fail without a log
+    with open(stata, "rb") as f:
+        if f.read(2) == b"#!":
+            raise SystemExit(f"repl: {stata} is a launcher script; set STATA to the stata-mp binary it "
+                             "runs, and LD_LIBRARY_PATH as the script sets it")
     home.mkdir(parents=True, exist_ok=True)
-    cmd = bwrap_cmd([str(paths.stata_binary()), "-b", "do", str(dofile)], cwd=cwd, home=home, rw=rw,
+    cmd = bwrap_cmd([str(stata), "-b", "do", str(dofile)], cwd=cwd, home=home, rw=rw,
                     ro=ro, env=env, network=network)
     return run(cmd, timeout, cwd / f"{dofile.stem}.stdout")
