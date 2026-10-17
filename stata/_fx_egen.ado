@@ -61,6 +61,7 @@ program Fast
 		}
 	}
 	capture confirm new variable `name'
+	if _rc == 1 exit 1
 	if _rc {
 		c_local fx_reason name
 		exit
@@ -88,6 +89,7 @@ program Fast
 		exit
 	}
 	capture version 6: syntax [if] [in] [, *]
+	if _rc == 1 exit 1
 	if _rc {
 		c_local fx_reason syntax
 		exit
@@ -106,27 +108,33 @@ program Fast
 	* a variable of the dataset and not be followed by [ or (: the original runs with extra
 	* variables (sortpreserve's and its own tempvars, all named __...) that an abbreviation could
 	* match, and Stata's reserved names (_n, _pi, _b, ...) are no variables. Wildcards starting
-	* with *, ? or ~ could match those tempvars too. Random numbers, r(), s() and sum() depend on
-	* when and in which order the original evaluates them.
+	* with *, ? or ~ could match those tempvars too. Random numbers, regexs()/ustrregexs()/
+	* regexcapture() (the last match of the latest regexm()/regexmatch() call), r(), s() and
+	* sum() depend on when and in which order the original evaluates them. Time-series operators
+	* chain (LD.x, L2D.x, DL(1/2).x); options (sd(#), by()) hold none.
 	local txt `"`args' `if' `options'"'
-	if ustrregexm(`"`txt'"', "\[") | ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])[LFDSlfds][0-9]*[.(]") {
+	local stop = ustrregexm(`"`txt'"', "\[") | ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])[LFDSlfds][0-9]*[.(]")
+	if `stop' | ustrregexm(`"`args' `if'"', "(^|[^A-Za-z0-9_])([LFDSlfds][0-9]*)+[.(]") {
 		c_local fx_reason subscript
 		exit
 	}
-	* (no exit inside the loop: under version 16, exit inside a loop does not leave the program)
-	local reserved _n _N _b _se _coef _cons _pi _rc _skip _pred _all
-	local rest `"`txt'"'
+	* (no exit inside the loop: under version 16, exit inside a loop does not leave the program;
+	* text without _ skips it)
 	local usbad 0
-	while !`usbad' & ustrregexm(`"`rest'"', "(^|[^A-Za-z0-9_])(_[A-Za-z0-9_]*)(\s*)([\[(]?)") {
-		local s0 = ustrregexs(0)
-		local tok = ustrregexs(2)
-		local nxt = ustrregexs(4)
-		local isv 0
-		if "`nxt'" == "" & !`: list tok in reserved' {
-			quietly mata: st_local("isv", strofreal(st_nvar() ? anyof(st_varname(1..st_nvar()), st_local("tok")) : 0))
+	if strpos(`"`txt'"', "_") {
+		local reserved _n _N _b _se _coef _cons _pi _rc _skip _pred _all
+		local rest `"`txt'"'
+		while !`usbad' & ustrregexm(`"`rest'"', "(^|[^A-Za-z0-9_])(_[A-Za-z0-9_]*)(\s*)([\[(]?)") {
+			local s0 = ustrregexs(0)
+			local tok = ustrregexs(2)
+			local nxt = ustrregexs(4)
+			local isv 0
+			if "`nxt'" == "" & !`: list tok in reserved' {
+				quietly mata: st_local("isv", strofreal(st_nvar() ? anyof(st_varname(1..st_nvar()), st_local("tok")) : 0))
+			}
+			if !`isv' local usbad 1
+			local rest = usubstr(`"`rest'"', ustrpos(`"`rest'"', `"`s0'"') + ustrlen(`"`s0'"'), .)
 		}
-		if !`isv' local usbad 1
-		local rest = usubstr(`"`rest'"', ustrpos(`"`rest'"', `"`s0'"') + ustrlen(`"`s0'"'), .)
 	}
 	if `usbad' {
 		c_local fx_reason underscore
@@ -140,7 +148,8 @@ program Fast
 	}
 	local rfn runiform|rnormal|rbeta|rbinomial|rcauchy|rchi2|rexponential|rgamma|rhypergeometric
 	local rfn `rfn'|rigaussian|rlaplace|rlogistic|rnbinomial|rpoisson|rt|rweibull|rweibullph
-	local rfn `rfn'|runiformint|rdiscrete|uniform|uniform0|r|s|sum
+	local rfn `rfn'|runiformint|rdiscrete|rgeometric|uniform|uniform0|r|s|sum
+	local rfn `rfn'|regexs|ustrregexs|regexcapture|regexcapturenamed
 	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(`rfn')\s*\(") {
 		c_local fx_reason "state"
 		exit
@@ -222,6 +231,7 @@ program Fast
 	else if "`fcn'" == "rank" {
 		capture version 16.1: syntax newvarname =/exp [if] [in] [, BY(varlist) Field Track Unique Suffix(string) *]
 	}
+	if _rc == 1 exit 1
 	if _rc {
 		c_local fx_reason syntax
 		exit
@@ -284,6 +294,7 @@ program Fast
 		local strbad 0
 		foreach v of local varlist {
 			capture confirm numeric variable `v'
+			if _rc == 1 exit 1
 			if _rc & !(inlist("`fcn'", "rowmiss", "rownonmiss") & ("`fcn'" == "rowmiss" | "`strok'" != "")) {
 				local strbad 1
 			}
@@ -317,11 +328,13 @@ program Fast
 		if "`fcn'" == "count" {
 			if `simple' {
 				capture unab xv : `e', max(1)
+				if _rc == 1 exit 1
 				if _rc local xv
 			}
 			if "`xv'" == "" {
 				tempvar xt
 				capture quietly gen byte `xt' = !missing(`exp')
+				if _rc == 1 exit 1
 				if _rc {
 					c_local fx_reason exp
 					exit
@@ -332,12 +345,14 @@ program Fast
 		}
 		else {
 			capture unab xv : `e', max(1)
+			if _rc == 1 exit 1
 			if !_rc {
 				if !`unabpath' & !`simple' {
 					c_local fx_reason exp
 					exit
 				}
 				capture confirm numeric variable `xv'
+				if _rc == 1 exit 1
 				if _rc {
 					c_local fx_reason exp
 					exit
@@ -346,9 +361,24 @@ program Fast
 			else {
 				tempvar xt
 				capture quietly gen double `xt' = (`e')
+				if _rc == 1 exit 1
 				if _rc {
 					c_local fx_reason exp
 					exit
+				}
+				* With by-groups the original evaluates the expression inside sum(), which
+				* adds a -inf (or a NaN), where the variable holds . (only an expression can
+				* give them; checked only when the variable has missing values)
+				if "`by'" != "" & inlist("`fcn'", "total", "sum", "mean", "sd", "std") {
+					quietly count if missing(`xt')
+					if r(N) {
+						capture quietly count if missing(`xt') & !missing((`e'))
+						if _rc == 1 exit 1
+						if _rc | r(N) {
+							c_local fx_reason overflow
+							exit
+						}
+					}
 				}
 				local xv `xt'
 			}
@@ -375,6 +405,7 @@ program Fast
 	if `"`egif'`egin'"' != "" {
 		tempvar touse
 		capture mark `touse' `egif' `egin'
+		if _rc == 1 exit 1
 		if _rc {
 			c_local fx_reason if
 			exit
@@ -387,8 +418,13 @@ program Fast
 	local nv : list sizeof vals
 	local sorted = `"`byv'"' != ""
 	local hasmiss = "`missing'" != ""
-	_fx threads
+	local fx_threads = cond(c(MP), c(processors), 0)
+	local fx_keyint
 	_fx_call `keys' `vals' `tu', egen "phase=compute" "threads=`fx_threads'" "fcn=`fcn'" "type=`type'" "nkeys=`nk'" "sorted=`sorted'" "nvals=`nv'" "touse=`=`"`tu'"' != ""'" "missing=`hasmiss'" "cntflag=`cntflag'" `extra'
+	* the sample marker and the expression's variable are the last variables: dropping them
+	* now is free, after the output exists it would rewrite the dataset
+	if "`xt'`touse'" != "" drop `xt' `touse'
+	if `fx_plugrc' == 1 exit 1
 	if `fx_plugrc' {
 		c_local fx_reason "plugin r(`fx_plugrc')"
 		exit
@@ -399,30 +435,52 @@ program Fast
 	}
 	local otype `type'
 	if "`fcn'" == "tag" local otype byte
-	_fx store `fx_token' `otype' `name'
 
-	* ---- messages, labels and notes, as the original
+	* ---- the output with its label and notes, as the original (a Break waits until all are
+	* done), then the messages
+	nobreak {
+		_fx store `fx_token' `otype' `name'
+		if "`fcn'" == "group" {
+			local varlist `varlist'
+			if udstrlen("group(`varlist')") > 80 {
+				note `name' : group(`varlist')
+				label var `name' "see notes"
+			}
+			else label var `name' "group(`varlist')"
+		}
+		else if "`fcn'" == "tag" {
+			if length("tag(`varlist')") > 80 {
+				note `name' : tag(`varlist')
+			}
+			label var `name' "tag(`varlist')"
+		}
+		else if "`fcn'" == "rank" {
+			local space
+			if "`field'`track'" != "" local space " "
+			local by2
+			if "`by'" != "" local by2 = `"by `by'"'
+			label var `name' "`field'`track'`space'rank of `exp' `by2'"
+		}
+		else if "`fcn'" == "std" {
+			gettoken newexp empty : exp, match(pp)
+			if "`pp'" == "(" & ustrtrim(`"`empty'"') == "" {
+				local exp = ustrtrim(`"`newexp'"')
+			}
+			label var `name' `"Standardized values of `exp'"'
+		}
+	}
+
+	* ---- messages, as the original
 	* _ggroup.ado looks for the groups in a sample of the data (GroupFromSample) when the sample
 	* has an observation, _N > 50000, fewer than log2(_N) variables, no missing option and only
-	* numeric integer-valued keys among the sample's observations (its IsInteger). It does so in
-	* a non-quiet mata: line, which switches an SMCL log to {res} whatever the line finds; the
-	* same here, deliberately not quiet
+	* numeric integer-valued keys among the sample's observations (its IsInteger: fx_keyint,
+	* from the plugin). It does so in a non-quiet mata: line, which switches an SMCL log to
+	* {res} whatever the line finds; the same here, deliberately not quiet
 	if "`fcn'" == "group" & "`missing'" == "" & _N > 50000 & `fx_nmiss' < _N {
 		local nvar : list sizeof varlist
-		local sampled = `nvar' < ln(_N)/ln(2)
-		local cond !missing(`: subinstr local varlist " " ",", all')
-		if "`tu'" != "" local cond `tu' & `cond'
-		foreach v of local varlist {
-			if `sampled' {
-				local vt : type `v'
-				if substr("`vt'", 1, 3) == "str" local sampled 0
-				else if !inlist("`vt'", "byte", "int", "long") {
-					capture assert `v' == int(`v') if `cond', fast
-					if _rc local sampled 0
-				}
-			}
+		if `nvar' < ln(_N)/ln(2) & "`fx_keyint'" != "" & !strpos("`fx_keyint'", "0") {
+			mata: (void) st_nobs()
 		}
-		if `sampled' mata: (void) st_nobs()
 	}
 	if inlist("`fcn'", "median", "pctile", "iqr") & "`by'" == "" & "`fx_n'" == "0" {
 		* the original's _pctile prints this as text, not as an error
@@ -433,34 +491,6 @@ program Fast
 		local N : di %11.0fc `fx_nmiss'
 		local N `N'
 		di in bl "(`N' missing value`s' generated)"
-	}
-	if "`fcn'" == "group" {
-		local varlist `varlist'
-		if udstrlen("group(`varlist')") > 80 {
-			note `name' : group(`varlist')
-			label var `name' "see notes"
-		}
-		else label var `name' "group(`varlist')"
-	}
-	else if "`fcn'" == "tag" {
-		if length("tag(`varlist')") > 80 {
-			note `name' : tag(`varlist')
-		}
-		label var `name' "tag(`varlist')"
-	}
-	else if "`fcn'" == "rank" {
-		local space
-		if "`field'`track'" != "" local space " "
-		local by2
-		if "`by'" != "" local by2 = `"by `by'"'
-		label var `name' "`field'`track'`space'rank of `exp' `by2'"
-	}
-	else if "`fcn'" == "std" {
-		gettoken newexp empty : exp, match(pp)
-		if "`pp'" == "(" & ustrtrim(`"`empty'"') == "" {
-			local exp = ustrtrim(`"`newexp'"')
-		}
-		label var `name' `"Standardized values of `exp'"'
 	}
 	* verify mode: how the comparison with the original treats the new variable, "<tol> <name>":
 	* within tol, the accumulation-class tolerance (help fastata) for sums whose order follows

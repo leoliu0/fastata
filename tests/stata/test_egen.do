@@ -513,6 +513,91 @@ te "egen double v = min(0*x1) if x1 < ., by(g)" fast bg
 te "by gsz: egen v = max(xz) if xz == 0" fast bsz
 te "egen v = max(xz) if xz == 0, by(g)" fast base 0 v
 
+* ---- intermediate results beyond . (rust_kernels F1): Stata keeps a finite result past . raw
+* (positive: a missing value the next operation turns into ., negative: a number), stores
+* +-inf as ., and sum() adds a -inf; the fast path falls back [overflow] where its f64
+* arithmetic would differ. g=1 (8e307 x2), g=2 (-8e307 x3), g=3 (1e160, -1e160, 0),
+* g=4 (+-6e307 x2); w*y is -inf in observation 1, z*y is past . there.
+capture program drop tw
+* tw "<command>" <frame> <reason>: falls back for <reason>, with the original's result
+program tw
+	args cmd frame why
+	capture noisily fx_both `"`cmd'"', base(`frame') expect(egen fallback)
+	if _rc | `"`fxb_why'"' != `"`why'"' {
+		global TE_NFAIL = $TE_NFAIL + 1
+		di as err `"TEST_EGEN FAIL: `cmd' [`frame'; reason `fxb_why', not `why']"'
+	}
+	global TE_N = $TE_N + 1
+end
+frame create bov
+frame bov {
+	quietly {
+		set obs 12
+		gen byte g = cond(_n <= 2, 1, cond(_n <= 5, 2, cond(_n <= 8, 3, 4)))
+		gen double x = cond(_n <= 2, 8e307, cond(_n <= 5, -8e307, cond(mod(_n, 2), 6e307, -6e307)))
+		replace x = 1e160 in 6
+		replace x = -1e160 in 7
+		replace x = 0 in 8
+		gen double y = cond(_n == 1, 8e307, 2)
+		gen double w = cond(_n == 1, -8e307, 1)
+		gen double z = 1 + mod(_n, 3)
+		gen double q = cond(_n <= 4, x, cond(_n <= 6, _n - 4, .))
+		sort g
+	}
+}
+foreach f in total sum mean sd std {
+	tw "by g: egen double v = `f'(x)" bov overflow
+	tw "egen double v = `f'(x), by(g)" bov overflow
+	tw "by g: egen v = `f'(x) if g == 1" bov overflow
+	tw "egen double v = `f'(w*y) if g == 1, by(g)" bov overflow
+	tw "by g: egen double v = `f'(w*y + z)" bov overflow
+}
+tw "by g: egen double v = total(x) if g == 2" bov overflow
+te "by g: egen double v = total(x) if g == 3" fast bov
+te "by g: egen double v = mean(x) if g == 4" fast bov
+tw "by g: egen double v = sd(x) if g == 3" bov overflow
+tw "by g: egen double v = sd(x) if g == 4" bov overflow
+tw "by g: egen double v = std(x) if g == 4, mean(1)" bov overflow
+tw "by g: egen double v = median(x) if g == 1" bov overflow
+tw "egen double v = pctile(x) if g == 1, by(g) p(50)" bov overflow
+tw "by g: egen double v = iqr(x) if g == 4" bov overflow
+te "by g: egen double v = iqr(x) if g <= 2" fast bov
+te "by g: egen double v = median(x) if g == 4" fast bov
+te "by g: egen double v = total(z*y)" fast bov
+tw "egen double v = rowtotal(x x) if g == 2" bov overflow
+tw "egen double v = rowtotal(x x), missing" bov overflow
+tw "egen double v = rowmean(x x z) if g == 2" bov overflow
+tw "egen double v = rowsd(x x) if g == 2" bov overflow
+te "egen double v = rowtotal(x x) if g == 3" fast bov
+te "egen double v = rowmean(x z) if g >= 3" fast bov
+tw "egen double v = iqr(q)" bov overflow
+te "egen double v = iqr(q) in 3/12" fast bov
+
+* ---- state functions (stata_fastpaths F1): regexs() and its kin return the match of the
+* latest regexm() call, which the original evaluates together with the if condition
+tw `"egen m = max(real(regexs(1))) if regexm(s, "(.+)"), by(g)"' base state
+tw `"egen double m = mean(real(ustrregexs(1))) if ustrregexm(s, "(.+)"), by(g)"' base state
+tw `"egen m = min(real(regexcapture(1))) if regexmatch(s, "(.+)")"' base state
+tw `"by g: egen m = total(real(regexs(1))) if regexm(s, "(.+)")"' bg state
+
+* ---- chained time-series operators (stata_fastpaths F2): the original sorts by the by()
+* variables first and then fails (not sorted)
+frame create bts
+frame bts {
+	quietly {
+		set obs 400
+		gen int pid = ceil(_n/20)
+		gen int t = mod(_n - 1, 20)
+		gen double x = rnormal()
+		gen byte gg = mod(_n, 7)
+		tsset pid t
+	}
+}
+foreach op in LD DL L2D D2L LS FD {
+	tw "egen double m = mean(`op'.x), by(gg)" bts subscript
+	tw "egen double m = total(`op'.x) if x > 0, by(pid)" bts subscript
+}
+
 if $TE_NFAIL {
 	di as err "TEST_EGEN failed: $TE_NFAIL of $TE_N specs (lines TEST_EGEN FAIL above)"
 	exit 9
