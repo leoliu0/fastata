@@ -14,6 +14,9 @@ fx_testdata
 gen double cp = -10 + 2.5*_n if _n <= 9
 gen double xneg = -abs(x2)
 gen double xc = round(x1, 5)
+* zz: +0 in odd and -0 in even observations (Stata expressions turn -0 into 0; Mata stores it)
+gen double zz = 0
+mata: st_store(selectindex(mod(1::st_nobs(), 2) :== 0), "zz", J(floor(st_nobs()/2), 1, -(1e-300*1e-300)))
 frame copy default base
 frame copy default bg
 frame bg: sort g id
@@ -97,6 +100,99 @@ fx_cmpframes r_off r_on, tol(0) what("xtile with runiform()")
 frame drop r_off
 frame drop r_on
 global FQ_N = $FQ_N + 1
+
+mata:
+// (fast, fallback) calls of fastata's cmd this session
+real rowvector _tq_counts(string scalar cmd)
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_cnt")) == NULL) return((0, 0))
+	if (!asarray_contains(*p, cmd)) return((0, 0))
+	return(asarray(*p, cmd))
+}
+end
+* random functions and a fallback after the fast path evaluated exp or if: the original must
+* draw the same numbers, and a later draw must match. rq "<cmd>" fast|fallback ["<reason>"]
+* runs cmd (under capture) and then gen after = runiform() from seed 7, with fastata off and on
+capture program drop rq
+program rq
+	args cmd kind why
+	local c : word 1 of `cmd'
+	foreach m in off on {
+		capture frame drop r_`m'
+		frame copy base r_`m'
+		quietly fastata `m'
+		if "`m'" == "on" mata: _rq0 = _tq_counts("`c'")
+		frame r_`m' {
+			set seed 7
+			capture noisily `cmd'
+			local rc_`m' = _rc
+			gen double after = runiform()
+		}
+	}
+	mata: _rq1 = _tq_counts("`c'")
+	mata: st_local("nfast", strofreal(_rq1[1] - _rq0[1])); st_local("nfb", strofreal(_rq1[2] - _rq0[2]))
+	if "`kind'" == "fast" assert `nfast' == 1 & `nfb' == 0
+	else {
+		mata: st_local("w", asarray(*findexternal("_fx_why"), "`c'"))
+		if `nfb' != 1 | `"`w'"' != `"`why'"' {
+			di as err `"`cmd': expected fallback [`why'], got `nfast' fast, `nfb' fallback [`w']"'
+			exit 9
+		}
+	}
+	assert `rc_off' == `rc_on'
+	fx_cmpframes r_off r_on, tol(0) what(`"`cmd', then runiform()"')
+	frame drop r_off
+	frame drop r_on
+	global FQ_N = $FQ_N + 1
+end
+rq "pctile double p = zz*(1+0*runiform()), nq(4)" fallback "signed zero"
+rq "pctile p = x1*(1+0*runiform()) if u > 2, nq(4)" fallback error
+rq "xtile q = .*runiform(), nq(2)" fallback error
+rq "xtile q = zz if runiform() < .5, nq(3)" fallback "signed zero"
+rq "xtile q = zz [aw=w] if rnormal() > 0, nq(3)" fallback "signed zero"
+rq "xtile q = x1 + runiform() if u < .5, nq(5)" fast
+rq "pctile p = x1 + rnormal(), nq(7)" fast
+
+* state-dependent functions: r() (xtile.ado replaces it with count's before it evaluates exp
+* when nquantiles() is given), s() and regexs()/ustrregexs()
+capture program drop qr1
+program qr1
+	quietly summarize x1
+	xtile q = x1 - r(mean), nq(4)
+end
+capture program drop qr2
+program qr2
+	quietly summarize x1
+	xtile q = x1 if x1 > r(mean), nq(4)
+end
+capture program drop qr3
+program qr3
+	quietly summarize x1
+	pctile p = x1 - r(mean) if x1 > r(min) + 1, nq(4)
+end
+capture program drop qr4
+program qr4
+	quietly summarize x1
+	xtile q = x1 - r(mean)
+end
+fq "qr1" xtile fallback
+fq "qr2" xtile fast
+fq "qr3" pctile fast
+fq "qr4" xtile fast
+fq `"xtile q = x1 if regexm(s, "s(1)") & regexs(1) == "1", nq(3)"' xtile fallback
+fq `"pctile p = x1 + (ustrregexs(0) == ""), nq(3)"' pctile fallback
+fq `"xtile q = x1 + (s(weight) == ""), nq(3)"' xtile fallback
+
+* a variable name followed by if or in is read directly; pctile.ado takes exp as a variable list
+* when confirm variable accepts it (x1 x2), else as an expression (x1-x2 is a difference)
+fq "pctile p = x1 if u < .5, nq(4)" pctile fast
+fq "pctile double p = xf in 10/20000, nq(9)" pctile fast
+fq "xtile q = xf  if u < .5 , nq(4)" xtile fast
+fq "pctile p = x1 x2, nq(4)" pctile fallback
+fq "pctile p = x1-x2, nq(4)" pctile fast
+fq "xtile q = x1-x2, nq(4)" xtile fast
 
 * ---------------------------------------------------------------- xtile, fallback
 fq "xtile q = x1 if x1 > 1000, nq(4)" xtile fallback
@@ -185,6 +281,56 @@ fq "pctile p = xn * 1, nq(4)" pctile fast bnan
 fq "xtile q = x1, nq(10)" xtile fast bnan
 fq "pctile p = x2 [aw=u], nq(4)" pctile fast bnan
 
+
+* ---------------------------------------------------------------- values near the largest double
+* the average of two values below -8.988e307 is -inf (_pctile returns .); a total weight times
+* nq beyond the largest double
+frame create bovf
+frame bovf {
+	quietly {
+		set obs 40
+		gen long id = _n
+		gen double xp = 8.9e307 - (_n - 1) * 1e305
+		gen double xn = -xp
+		gen double xr = -8e307 * 2 - _n * 1e304 in 1/20
+		replace xr = 8e307 - _n * 1e300 in 21/40
+		gen double xr2 = -8e307 * 2 - _n * 1e305
+		gen double xm = cond(mod(_n, 2), 8.98e307, -8.98e307)
+		gen double xf = 1.7014118e38 + (_n - 20) * 1e31
+		gen double xf2 = 3e38 * (_n - 20)
+		gen double wbig = 8e307
+		gen double wmid = 1e306
+		gen double fbig = 4e307
+		gen double fmid = 1e306
+		gen double one = 1
+		gen double xs = _n
+	}
+}
+fq "pctile double p = xp, nq(4)" pctile fast bovf
+fq "pctile double p = xn, nq(4)" pctile fast bovf
+fq "pctile double p = xm, nq(4)" pctile fast bovf
+fq "pctile double p = xm, nq(5) altdef" pctile fast bovf
+fq "pctile double p = xr, nq(4)" pctile fallback bovf
+fq "pctile double p = xr2, nq(4)" pctile fallback bovf
+fq "pctile double p = xr2, nq(3) altdef" pctile fast bovf
+fq "pctile double p = xr2, nq(3)" pctile fast bovf
+fq "pctile float p = xf, nq(4)" pctile fast bovf
+fq "pctile float p = xf2, nq(5) altdef" pctile fast bovf
+fq "pctile double p = xs [aw=wbig], nq(4)" pctile fallback bovf
+fq "pctile double p = xs [fw=fbig], nq(4)" pctile fallback bovf
+fq "pctile double p = xs [aw=wmid], nq(4)" pctile fast bovf
+fq "pctile double p = xs [fw=fmid], nq(4)" pctile fast bovf
+fq "pctile double p = xr2 [aw=one], nq(4)" pctile fallback bovf
+fq "pctile double p = xn*2, nq(4)" pctile any bovf
+fq "xtile q = xr2, nq(4)" xtile fallback bovf
+fq "xtile q = xr, nq(4)" xtile any bovf
+fq "xtile q = xm, nq(4)" xtile fast bovf
+fq "xtile q = xr2, nq(3) altdef" xtile fast bovf
+fq "xtile q = xs [aw=wbig], nq(4)" xtile fallback bovf
+fq "xtile q = xs [aw=wmid], nq(4)" xtile fast bovf
+fq "xtile q = xr2 [aw=one], nq(4)" xtile fallback bovf
+fq "xtile q = xn*2, nq(4)" xtile any bovf
+fq "xtile q = xp*2, nq(4)" xtile fallback bovf
 
 * c(type) double: pctile's default type follows it
 set type double

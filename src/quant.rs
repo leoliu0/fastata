@@ -12,7 +12,7 @@
 //!   cumulative weight W(i) as equal to P when it is within about 1e-7*W of it (measured: the
 //!   switch lies within 1e-7*W*(1 +- 2e-9) for weights scaled from 1e-6 to 1e6), so W(i) slightly
 //!   above P also averages x(i) and x(i+1). The exact form of that test is not known, so
-//!   [`Weighted::pctile`] answers `None` whenever a cumulative weight lies close enough to the
+//!   [`weighted_pctile`] answers `None` whenever a cumulative weight lies close enough to the
 //!   switch for the answer to depend on it (the caller then runs the original).
 //!
 //! The unweighted functions take the nonmissing values sorted ascending, nonempty, and a
@@ -118,16 +118,18 @@ pub fn pctile_nq(xs: &[f64], k: usize, nq: usize) -> f64 {
 }
 
 /// Weighted definition, `ws[k]` the (positive) weight of `xs[k]`, sorted by x: the value of
-/// [`Weighted::pctile`], or, where that is undetermined, the value under a tolerance of exactly
+/// [`weighted_pctile`], or, where that is undetermined, the value under a tolerance of exactly
 /// 1e-7*W (which may differ from `_pctile` there).
+#[cfg(test)]
 pub fn pctile_w(xs: &[f64], ws: &[f64], p: f64) -> f64 {
     debug_assert_eq!(xs.len(), ws.len());
     let t = Weighted::new(xs, ws);
-    t.pctile(Pos::P(p)).unwrap_or_else(|| t.pctile_with(Pos::P(p), 0.0).unwrap_or(xs[xs.len() - 1]))
+    t.pctile(Pos::P(p)).unwrap_or_else(|| pctile_with(&t, Pos::P(p), 0.0).unwrap_or(xs[xs.len() - 1]))
 }
 
 /// `altdef`: P = (n+1)*p/100, i = floor(P), h = P - i. The percentile is
 /// (1-h)*x(i) + h*x(i+1).
+#[cfg(test)]
 pub fn pctile_altdef(xs: &[f64], p: f64) -> f64 {
     need_altdef(xs.len(), Pos::P(p)).value(|r| xs[r - 1])
 }
@@ -140,6 +142,7 @@ pub fn pctile_altdef_nq(xs: &[f64], k: usize, nq: usize) -> f64 {
 
 /// The percentiles of `nq` quantiles as the manual states them: p_k = 100*k/nq for
 /// k = 1..nq-1. (`_pctile, n(nq)` itself uses [`Pos::Nq`].)
+#[cfg(test)]
 pub fn nq_percents(nq: usize) -> Vec<f64> {
     (1..nq).map(|k| 100.0 * k as f64 / nq as f64).collect()
 }
@@ -150,7 +153,77 @@ const TOL_BAND: f64 = 1e-6;
 /// `_pctile`'s weighted tolerance, relative to the total weight.
 const TOL: f64 = 1e-7;
 
+/// Weighted data sorted by x (positive weights), seen through its runs of equal values. The
+/// cumulative weight of a run is the total weight of every observation up to and including it,
+/// summed in any fixed order: [`Runs::noise`] bounds how far it and `_pctile`'s may be apart.
+pub trait Runs {
+    type Run: Copy;
+    /// The total weight W (the cumulative weight of the last run, summed the same way).
+    fn total(&self) -> f64;
+    /// Bound on the distance between a cumulative weight here and `_pctile`'s, which may sum in
+    /// another order: 0 when every weight is an integer and the sums are exact.
+    fn noise(&self) -> f64;
+    /// The first run whose cumulative weight is >= t (> t when `strict`), if any.
+    fn first(&self, t: f64, strict: bool) -> Option<Self::Run>;
+    /// The cumulative weight of a run.
+    fn cum(&self, r: Self::Run) -> f64;
+    /// The value of a run.
+    fn x(&self, r: Self::Run) -> f64;
+    /// The smallest and largest weight in a run, and its number of observations.
+    fn stats(&self, r: Self::Run) -> (f64, f64, usize);
+    /// The run after `r`, if any.
+    fn next(&self, r: Self::Run) -> Option<Self::Run>;
+}
+
+/// The weighted percentile, or `None` when it depends on details of `_pctile`'s tolerance or
+/// summation order that are not known. The total weight times the largest position (100, or nq)
+/// must be finite (the caller falls back otherwise).
+pub fn weighted_pctile<R: Runs>(r: &R, pos: Pos) -> Option<f64> {
+    pctile_with(r, pos, TOL * r.total() * TOL_BAND + r.noise())
+}
+
+/// The first i with W(i) > P - tol decides: (x(i) + x(i+1))/2 if W(i) <= P + tol, else x(i).
+/// Only the cumulative weights at the ends of runs of equal values, and which observation of a
+/// run comes last, can change the value; `None` when one of them is within `delta` of P - tol or
+/// P + tol.
+fn pctile_with<R: Runs>(r: &R, pos: Pos, delta: f64) -> Option<f64> {
+    let w = r.total();
+    let pp = match pos {
+        Pos::P(p) => w * p / 100.0,
+        Pos::Nq(k, nq) => w * k as f64 / nq as f64,
+    };
+    let tol = TOL * w;
+    let (lo, hi) = (pp - tol, pp + tol);
+    let near = |t: f64| r.first(t - delta, false).is_some_and(|run| r.cum(run) <= t + delta);
+    if delta > 0.0 && (near(lo) || near(hi)) {
+        return None;
+    }
+    let run = r.first(lo, true)?;
+    let cum = r.cum(run);
+    if cum > hi {
+        return Some(r.x(run));
+    }
+    // W(end of run) is within the tolerance: the run's last observation is the first above
+    // P - tol (giving the average with the next value) unless an earlier one already is.
+    let (wmin, wmax, len) = r.stats(run);
+    let last_first = if len == 1 {
+        true
+    } else if cum - wmin <= lo - delta {
+        true
+    } else if cum - wmax > lo + delta {
+        false
+    } else {
+        return None;
+    };
+    if !last_first {
+        return Some(r.x(run));
+    }
+    let next = r.next(run)?;
+    Some((r.x(run) + r.x(next)) / 2.0)
+}
+
 /// One run of equal values in weighted sorted data.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug)]
 struct Run {
     x: f64,
@@ -161,15 +234,15 @@ struct Run {
     len: usize,
 }
 
-/// Weighted percentiles of data sorted by x, with positive weights.
+/// The reference [`Runs`]: every run of the sorted data, with sequential cumulative weights.
+#[cfg(test)]
 pub struct Weighted {
     runs: Vec<Run>,
     total: f64,
-    /// Bound on how far a cumulative weight (and P) computed by `_pctile`, which may sum in
-    /// another order, can be from ours: 0 when every weight is an integer and the sums are exact.
     noise: f64,
 }
 
+#[cfg(test)]
 impl Weighted {
     /// `xs` sorted ascending (equal values adjacent), `ws` their positive weights.
     pub fn new(xs: &[f64], ws: &[f64]) -> Weighted {
@@ -190,63 +263,47 @@ impl Weighted {
                 _ => runs.push(Run { x, cum, wmin: w, wmax: w, len: 1 }),
             }
         }
-        let exact = ints && cum <= 9007199254740992.0;
-        let noise = if exact { 0.0 } else { (4.0 * xs.len() as f64 + 64.0) * f64::EPSILON * cum };
-        Weighted { runs, total: cum, noise }
+        Weighted { runs, total: cum, noise: noise(ints, xs.len(), cum) }
     }
 
-    #[cfg(test)]
-    pub fn total(&self) -> f64 {
+    pub fn pctile(&self, pos: Pos) -> Option<f64> {
+        weighted_pctile(self, pos)
+    }
+}
+
+#[cfg(test)]
+impl Runs for Weighted {
+    type Run = usize;
+    fn total(&self) -> f64 {
         self.total
     }
-
-    /// The weighted percentile, or `None` when it depends on details of `_pctile`'s tolerance
-    /// or summation order that are not known.
-    pub fn pctile(&self, pos: Pos) -> Option<f64> {
-        self.pctile_with(pos, TOL * self.total * TOL_BAND + self.noise)
+    fn noise(&self) -> f64 {
+        self.noise
     }
-
-    /// The first i with W(i) > P - tol decides: (x(i) + x(i+1))/2 if W(i) <= P + tol, else x(i).
-    /// Only the cumulative weights at the ends of runs of equal values, and which observation of
-    /// a run comes last, can change the value; `None` when one of them is within `delta` of
-    /// P - tol or P + tol.
-    fn pctile_with(&self, pos: Pos, delta: f64) -> Option<f64> {
-        let w = self.total;
-        let pp = match pos {
-            Pos::P(p) => w * p / 100.0,
-            Pos::Nq(k, nq) => w * k as f64 / nq as f64,
-        };
-        let tol = TOL * w;
-        let (lo, hi) = (pp - tol, pp + tol);
-        let near = |t: f64| {
-            let a = self.runs.partition_point(|r| r.cum < t - delta);
-            self.runs.get(a).is_some_and(|r| r.cum <= t + delta)
-        };
-        if delta > 0.0 && (near(lo) || near(hi)) {
-            return None;
-        }
-        let r = self.runs.partition_point(|r| r.cum <= lo);
-        let run = self.runs.get(r)?;
-        if run.cum > hi {
-            return Some(run.x);
-        }
-        // W(end of run) is within the tolerance: the run's last observation is the first above
-        // P - tol (giving the average with the next value) unless an earlier one already is.
-        let last_first = if run.len == 1 {
-            true
-        } else if run.cum - run.wmin <= lo - delta {
-            true
-        } else if run.cum - run.wmax > lo + delta {
-            false
-        } else {
-            return None;
-        };
-        if !last_first {
-            return Some(run.x);
-        }
-        let next = self.runs.get(r + 1)?;
-        Some((run.x + next.x) / 2.0)
+    fn first(&self, t: f64, strict: bool) -> Option<usize> {
+        let i = self.runs.partition_point(|r| if strict { r.cum <= t } else { r.cum < t });
+        (i < self.runs.len()).then_some(i)
     }
+    fn cum(&self, r: usize) -> f64 {
+        self.runs[r].cum
+    }
+    fn x(&self, r: usize) -> f64 {
+        self.runs[r].x
+    }
+    fn stats(&self, r: usize) -> (f64, f64, usize) {
+        let r = &self.runs[r];
+        (r.wmin, r.wmax, r.len)
+    }
+    fn next(&self, r: usize) -> Option<usize> {
+        (r + 1 < self.runs.len()).then_some(r + 1)
+    }
+}
+
+/// [`Runs::noise`] for n observations with total weight `total`, given whether every weight is
+/// an integer: 0 when the sums are exact in any order, else a bound on the rounding of two sums
+/// of n positive terms in different orders.
+pub fn noise(ints: bool, n: usize, total: f64) -> f64 {
+    if ints && total <= 9007199254740992.0 { 0.0 } else { (4.0 * n as f64 + 64.0) * f64::EPSILON * total }
 }
 
 #[cfg(test)]

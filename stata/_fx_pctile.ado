@@ -82,47 +82,65 @@ program Fast
 		c_local fx_why "exp"
 		exit
 	}
+	* state-dependent functions: s() and regexs()/ustrregexs() (the last match of
+	* regexm()/ustrregexm(), which this program's parsing calls)
+	local txt `"`p_exp' `p_if'"'
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs)\s*\(") {
+		c_local fx_why "state"
+		exit
+	}
+	* random-number functions: a fallback after exp or if was evaluated puts the random-number
+	* state back, so that the original draws the same numbers
+	local rng
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
+		local rng = c(rngstate)
+	}
+	* pctile.ado reads exp as a variable when confirm variable accepts it (syntax leaves a blank
+	* after exp when if or in follows), else generates it; a list of variables (x1 x2) runs the
+	* original
 	tempvar touse x
 	local xv
-	if ustrregexm(`"`p_exp'"', "^[A-Za-z_][A-Za-z0-9_]*$") {
-		capture confirm variable `p_exp'
-		if !_rc {
-			capture confirm numeric variable `p_exp'
-			if _rc {
-				c_local fx_why "exp"
-				exit
-			}
-			unab xv : `p_exp'
+	capture confirm variable `p_exp'
+	if !_rc {
+		if !ustrregexm(`"`p_exp'"', "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$") {
+			c_local fx_why "exp"
+			exit
 		}
-	}
-	if "`xv'" == "" {
-		capture Gen6 `x' `p_exp'
+		local xn = ustrregexs(1)
+		capture confirm numeric variable `xn'
 		if _rc {
 			c_local fx_why "exp"
 			exit
 		}
-		local xv `x'
+		unab xv : `xn'
+	}
+	local why
+	if "`xv'" == "" {
+		capture Gen6 `x' `p_exp'
+		if _rc == 1 exit 1
+		if _rc local why "exp"
+		else local xv `x'
 	}
 	local hastouse 0
-	if `"`p_if'`p_in'"' != "" {
+	if "`why'" == "" & `"`p_if'`p_in'"' != "" {
 		capture Mark6 `touse' `p_if' `p_in'
-		if _rc {
-			c_local fx_why "error"
-			exit
-		}
-		local hastouse 1
+		if _rc == 1 exit 1
+		if _rc local why "error"
+		else local hastouse 1
 	}
-	local tv = cond(`hastouse', "`touse'", "")
-	quietly _fx threads
-	_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=pctile" /*
-		*/ "nq=`p_nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" /*
-		*/ "touse=`hastouse'" "float=`=("`p_typ'" == "float")'"
-	if `fx_plugrc' {
-		c_local fx_why `"plugin error r(`fx_plugrc')"'
-		exit
+	if "`why'" == "" {
+		local tv = cond(`hastouse', "`touse'", "")
+		local fx_threads = cond(c(MP), c(processors), 0)
+		_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=pctile" /*
+			*/ "nq=`p_nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" /*
+			*/ "touse=`hastouse'" "float=`=("`p_typ'" == "float")'"
+		if `fx_plugrc' == 1 exit 1
+		if `fx_plugrc' local why "plugin error r(`fx_plugrc')"
+		else if `"`fx_fallback'"' != "" local why `"`fx_fallback'"'
 	}
-	if `"`fx_fallback'"' != "" {
-		c_local fx_why `"`fx_fallback'"'
+	if `"`why'"' != "" {
+		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
+		c_local fx_why `"`why'"'
 		exit
 	}
 	capture drop `touse'
