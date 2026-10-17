@@ -9,7 +9,10 @@ program _fx_isid
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'
-	_fx gate isid
+	* small data: below 150 observations the original runs right away (see _fx_egen)
+	local fx_small 0
+	if c(N) < 150 _fx small isid
+	if !`fx_small' _fx gate isid
 	if `fx_ok' {
 		local fx_why
 		foreach word of local 0 {
@@ -67,8 +70,7 @@ program _fx_isid
 			exit
 		}
 	}
-	_fx count isid fallback `"`fx_why'"'
-	_fx orig isid
+	if !`fx_small' _fx fallback isid `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end

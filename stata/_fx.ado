@@ -8,11 +8,30 @@
 *! ado-file Mata code. Mata lines that print nothing run under quietly: a non-quiet mata: line
 *! switches an SMCL log to {res}, which the original commands' logs would not show.
 *!
-*! For the _fx_<cmd> programs:
+*! For the _fx_<cmd> programs (the first five are the per-call ones: each ends in exit, so that
+*! Stata does not read through the rest of this program, which costs about 20 µs a call):
 *!   gate <key>                        fx_ok: 1 if every original file of key is verified; fx_why;
 *!                                     fx_vpend: 1 in verify mode when fx_ok is 1 (gate has then
-*!                                     copied the current frame to frame __fx_vsnap)
-*!   count <cmd> fast|fallback ["<reason>"]
+*!                                     copied the current frame to a frame of a name no other
+*!                                     frame has; verify, a fallback, a failed store or Break in
+*!                                     the plugin drop it, else the next gate. No tempname: one
+*!                                     here would shift the temporary names the original then
+*!                                     gets, which pctile's genp() label shows)
+*!   count <cmd> fast|verify_ok|verify_mismatch|verify_skipped ["<reason>"]
+*!   store <token> <type> <name> [<type> <name> ...]
+*!                                     adds the variables (nofill) and fills them from the
+*!                                     plugin's cache, under nobreak; on any failure (including a
+*!                                     plugin that _fx_call could not use) drops them again (and
+*!                                     a pending verify snapshot) and exits with the plugin's
+*!                                     return code (9999 if it gave none)
+*!   fallback <cmd> "<reason>"         counts a fallback of cmd and sets fx_prog (count + orig)
+*!   small <cmd>                       the small-data cutoff, for a call with few observations:
+*!                                     fx_small 1 when the caller is to run the original right
+*!                                     away (the call is then counted as fallback "small data",
+*!                                     and fx_prog, fx_ok 0 and fx_why are set); fx_small 0 in
+*!                                     verify mode and after small off
+*!   vabort                            drops a pending verify snapshot (the fast path stops with
+*!                                     an error; _fx_call on Break)
 *!   orig <cmd>                        fx_prog: the program that runs cmd's original ado-file
 *!   verify <cmd> <caller> <rc0> <frc> <fleft> "<byvars>" "<byrc0>" <tol> "<rspec>" "<args>"
 *!                                     after a fast path that ran with fx_vpend 1, with frc its
@@ -33,32 +52,37 @@
 *!                                     verify: every fast path is checked against the original
 *!                                     (see verify). Without a mode set this session (clear all
 *!                                     forgets it), the mode is env FASTATA_MODE, else auto
+*!   small on|off                      the small-data cutoff (on unless turned off this session;
+*!                                     clear all turns it on again)
 *!   counts_save "<file.csv>"          this session's counts as cmd,fast,fallback,last_reason
 *!   reset                             forgets cached gate verdicts, file hashes and gate list
-*!   runtime "<dir>" <version>         builds runtime directory dir
+*!   runtime "<dir>" <version> [0|1 [0|1]]  builds runtime directory dir ("": the one for the
+*!                                     current PLUS) unless the 3rd argument is 0; turns it on if
+*!                                     the 4th is 1
 *!   rtpath                            fx_rt: the runtime directory for the current PLUS
-*!   rtversion "<dir>"                 fx_have: the version dir was built for ("" if none)
-*!   onpath "<dir>"                    fx_onpath: 1 if dir is on the ado-path; fx_active: the
-*!                                     runtime directory in use ("" if none)
-*!   pathpos "<dir>"                   fx_pos: ado-path positions of dir and of every runtime
-*!                                     directory, highest first
+*!   rtversion ["<dir>"]               fx_have: the version dir was built for ("" if none);
+*!                                     fx_build: 1 if dir needs a (re)build; fx_disabled: 1 after
+*!                                     fastata disable
+*!   onpath ["<dir>"]                  fx_onpath: 1 if dir is on the ado-path; fx_active: the
+*!                                     runtime directory in use ("" if none); "" = the runtime
+*!                                     directory for the current PLUS
+*!   pathpos ["<dir>"]                 fx_pos: ado-path positions of dir and of every runtime
+*!                                     directory, highest first; "" as for onpath
 *!   rmruntime "<dir>"                 erases runtime directory dir
 *!   mkdirp "<dir>"                    creates dir and missing parents
 *!   profile_first "<PATH>" "<home>" "<rt>"      fx_profile: first existing profile.do, or ""
 *!   profile_with_block "<PATH>" "<home>" "<rt>" fx_profiles: those with the startup lines
 *!   has_block "<file>"                fx_hasblock: 1 if file has the startup lines
-*!   profile_write "<file>" 0|1        fx_rc: removes the startup lines, then adds them if 1
+*!   profile_write 1|0 ["<file>"]      fastata enable (1) / disable (0) profile.do work; prints
+*!                                     the outcome; fx_rc
 *!   block                             displays the startup lines as an error message
-*!   status                            fx_mode; fx_orig_<c>, fx_ver_<c>, fx_nfast_<c>, fx_nfb_<c>,
+*!   status [show <version>]           fx_mode; fx_orig_<c>, fx_ver_<c>, fx_nfast_<c>, fx_nfb_<c>,
 *!                                     fx_last_<c>, fx_vok_<c>, fx_vmis_<c>, fx_vskip_<c> for
-*!                                     every replaced command c
+*!                                     every replaced command c; with show: prints the fastata
+*!                                     status report
 *!   filehash "<file>"                 fx_bytes, fx_hash: what the gate list records for file
-*! For fast paths (two-phase protocol, see src/cache.rs):
+*! For fast paths:
 *!   threads                           fx_threads: the plugin's threads= value
-*!   store <token> <type> <name> [<type> <name> ...]
-*!                                     adds the variables (nofill) and fills them from the
-*!                                     plugin's cache, under nobreak; on failure drops them again
-*!                                     and exits with the plugin's return code
 program _fx
 	version 16
 	args sub
@@ -68,29 +92,55 @@ program _fx
 		quietly mata: _fx_gate_check(st_local("key"), st_local("envm"))
 		c_local fx_ok `fx_ok'
 		c_local fx_why `"`fx_why'"'
-		* verify mode: the snapshot that verify runs the original on, taken before the fast path
-		* changes anything
 		if "`fx_vmode'" == "1" VSnap
 		c_local fx_vpend `fx_vmode'
+		exit
 	}
-	else if "`sub'" == "count" {
+	if "`sub'" == "count" {
 		args sub cmd kind why
 		quietly mata: _fx_count(st_local("cmd"), st_local("kind"), st_local("why"))
-		* a fallback does not need the snapshot that gate took in verify mode
-		if `fx_vdrop' capture frame drop __fx_vsnap
-		* FASTATA_COUNTS names a file that gets one line per call (the replication harness reads
-		* it; unlike the session counters it survives clear all)
 		local f : env FASTATA_COUNTS
-		if `"`f'"' != "" & !`fx_skip' {
-			tempname fh
-			capture file open `fh' using `"`f'"', write text append
-			if !_rc {
-				file write `fh' `"`cmd',`kind',`why'"' _n
-				file close `fh'
-			}
-		}
+		if `"`f'"' != "" & !`fx_skip' CountFile `"`f'"' `"`cmd',`kind',`why'"'
+		exit
 	}
-	else if "`sub'" == "verify" {
+	if "`sub'" == "small" {
+		args sub cmd
+		if inlist("`cmd'", "on", "off") {
+			quietly mata: _fx_setsmall(st_local("cmd"))
+			exit
+		}
+		local envm : env FASTATA_MODE
+		quietly mata: _fx_small(st_local("cmd"), st_local("envm"))
+		if "`fx_small'" == "1" {
+			local f : env FASTATA_COUNTS
+			if `"`f'"' != "" & !`fx_skip' CountFile `"`f'"' `"`cmd',fallback,`fx_why'"'
+			if `"`fx_err'"' != "" | "`fx_prog'" == "" _fx orig `cmd'
+			c_local fx_prog `fx_prog'
+			c_local fx_ok 0
+			c_local fx_why `"`fx_why'"'
+		}
+		c_local fx_small `fx_small'
+		exit
+	}
+	if "`sub'" == "fallback" {
+		args sub cmd why
+		quietly mata: _fx_fallback(st_local("cmd"), st_local("why"))
+		local f : env FASTATA_COUNTS
+		if `"`f'"' != "" & !`fx_skip' CountFile `"`f'"' `"`cmd',fallback,`why'"'
+		if `"`fx_err'"' != "" | "`fx_prog'" == "" _fx orig `cmd'
+		c_local fx_prog `fx_prog'
+		exit
+	}
+	if "`sub'" == "store" {
+		gettoken sub rest : 0
+		Store `rest'
+		exit
+	}
+	if "`sub'" == "vabort" {
+		quietly mata: _fx_vabort()
+		exit
+	}
+	if "`sub'" == "verify" {
 		args sub cmd caller rc0 frc fleft byv byrc0 tol rspec cargs
 		quietly mata: _fx_vtake()
 		local orc `frc'
@@ -98,9 +148,11 @@ program _fx
 		local oleft = cond("`fleft'" == "", "0", "`fleft'")
 		if "`fx_vframe'" != "" {
 			capture _fx orig `cmd'
-			if _rc {
-				local fx_vwhy "original r(`=_rc')"
+			local rc = _rc
+			if `rc' {
 				capture frame drop `fx_vframe'
+				if `rc' == 1 exit 1
+				local fx_vwhy "original r(`rc')"
 				local fx_vframe
 			}
 		}
@@ -125,25 +177,43 @@ program _fx
 				local dlo : data label
 			}
 			quietly mata: _fx_vinset(0)
+			* Break while the original ran on the snapshot: stop, with the fast path's result
+			if `orc' == 1 {
+				capture frame drop `fx_vframe'
+				exit 1
+			}
 			local sbf : sortedby
 			local dlf : data label
 			local fx_vdiff
 			if `frc' != `orc' local fx_vdiff "return code `frc' vs `orc'"
 			else {
-				VHash `fx_vframe'
-				gettoken tolv tolvars : tol
-				quietly mata: _fx_vcompare("`fx_vframe'", `tolv', st_local("tolvars"), st_local("rspec"), st_local("fx_vhf"), st_local("fx_vho"))
+				* (a Break or an error here must not leave the snapshot behind)
+				capture VHash `fx_vframe'
+				local rc = _rc
+				if !`rc' {
+					gettoken tolv tolvars : tol
+					capture noisily quietly mata: _fx_vcompare("`fx_vframe'", `tolv', st_local("tolvars"), st_local("rspec"), st_local("fx_vhf"), st_local("fx_vho"))
+					local rc = _rc
+				}
+				if `rc' {
+					capture frame drop `fx_vframe'
+					exit `rc'
+				}
 			}
 			if `"`fx_vdiff'"' == "" & `orc' == 0 & "`fleft'" != "" & "`fleft'" != "`fx_oleft'" {
 				local fx_vdiff "c(rc) left `fleft' vs `fx_oleft'"
 			}
 			if `orc' == 0 & "`fx_oleft'" != "" local oleft `fx_oleft'
 			* keep the original's data: the frame it ran in takes the place of the current one
+			* (under nobreak: a Break in between would leave the user's data in another frame)
 			local cur = c(frame)
-			frame rename `cur' __fx_vold
-			frame rename `fx_vframe' `cur'
-			frame change `cur'
-			frame drop __fx_vold
+			quietly mata: st_local("vold", _fx_vuniq("__fx_vold"))
+			nobreak {
+				frame rename `cur' `vold'
+				frame rename `fx_vframe' `cur'
+				frame change `cur'
+				frame drop `vold'
+			}
 			if `"`fx_vdiff'"' == "" _fx count `cmd' verify_ok
 			else {
 				* egen: the function first, then the call (its start), so a line identifies the case
@@ -176,28 +246,6 @@ program _fx
 	else if "`sub'" == "threads" {
 		local t = cond(c(MP), c(processors), 0)
 		c_local fx_threads `t'
-	}
-	else if "`sub'" == "store" {
-		gettoken sub rest : 0
-		gettoken token rest : rest
-		local types
-		local names
-		while `"`rest'"' != "" {
-			gettoken t rest : rest
-			gettoken n rest : rest
-			local types `types' `t'
-			local names `names' `n'
-		}
-		local threads = cond(c(MP), c(processors), 0)
-		nobreak {
-			quietly mata: (void) st_addvar(tokens(st_local("types")), tokens(st_local("names")), 1)
-			_fx_call `names', store "token=`token'" "threads=`threads'"
-			if `fx_plugrc' {
-				drop `names'
-				if `"`fx_errmsg'"' != "" di as err `"`fx_errmsg'"'
-				exit `fx_plugrc'
-			}
-		}
 	}
 	else if "`sub'" == "mode" {
 		args sub mode
@@ -287,20 +335,68 @@ program _fx
 	}
 end
 
-* Verify mode, from gate: copies the current frame to frame __fx_vsnap and records the
-* random-number states (reading them does not advance them), or records why it could not.
+* Verify mode, from gate: the snapshot that verify runs the original on, taken before the fast
+* path changes anything. Copies the current frame to a frame whose name no frame has (so never
+* a user's frame) and records it with the random-number states (reading them does not advance
+* them), or records why it could not.
 program VSnap
-	capture frame drop __fx_vsnap
 	local srs = c(sortrngstate)
 	local rs = c(rngstate)
 	local why
-	capture frame copy `c(frame)' __fx_vsnap
-	if _rc {
-		local why "snapshot r(`=_rc')"
-		capture frame drop __fx_vsnap
+	quietly mata: st_local("vs", _fx_vuniq("__fx_vsnap"))
+	capture frame copy `c(frame)' `vs'
+	local rc = _rc
+	if `rc' {
+		capture frame drop `vs'
+		if `rc' == 1 exit 1
+		local why "snapshot r(`rc')"
 	}
-	else quietly mata: _fx_vlorder("__fx_vsnap")
-	quietly mata: _fx_vset(st_local("why"), st_local("srs"), st_local("rs"))
+	else quietly mata: _fx_vlorder("`vs'")
+	quietly mata: _fx_vset(st_local("why"), st_local("srs"), st_local("rs"), st_local("vs"))
+end
+
+* _fx store: adds the variables (nofill) and fills them from the plugin's cache, under nobreak.
+* Nofill variables must never stay unwritten: any failure drops them (and the fast path's verify
+* snapshot, which is no longer needed) and exits with the plugin's return code.
+program Store
+	gettoken token rest : 0
+	local types
+	local names
+	while `"`rest'"' != "" {
+		gettoken t rest : rest
+		gettoken n rest : rest
+		local types `types' `t'
+		local names `names' `n'
+	}
+	local threads = cond(c(MP), c(processors), 0)
+	nobreak {
+		quietly mata: (void) st_addvar(tokens(st_local("types")), tokens(st_local("names")), 1)
+		capture _fx_call `names', store "token=`token'" "threads=`threads'"
+		local rc = _rc
+		if !`rc' local rc = `fx_plugrc'
+		if !`rc' & `"`fx_fallback'"' != "" {
+			local rc 9999
+			local fx_errmsg `"fastata: internal error (store: `fx_fallback'); please report it"'
+		}
+		if `rc' {
+			drop `names'
+			quietly mata: _fx_vabort()
+			if `"`fx_errmsg'"' != "" di as err `"`fx_errmsg'"'
+			exit `rc'
+		}
+	}
+end
+
+* Appends line to the FASTATA_COUNTS file f, skipped if it cannot be opened (the replication
+* harness reads the file; unlike the session counters it survives clear all). The handle has a
+* fixed name: a tempname would shift the temporary names that the original then gets.
+program CountFile
+	args f line
+	capture file open _fx_cfh using `"`f'"', write text append
+	if !_rc {
+		file write _fx_cfh `"`line'"' _n
+		file close _fx_cfh
+	}
 end
 
 * Verify mode: runs original program prog as the shim would have run it (caller version, by
@@ -340,6 +436,7 @@ program VHash1
 	local fx_vh
 	if c(k) {
 		capture _fx_call _all, vhash "threads=`threads'"
+		if _rc == 1 exit 1
 		if _rc | `"`fx_fallback'"' != "" | "`fx_plugrc'" != "0" local fx_vh
 	}
 	c_local fx_vh `fx_vh'
@@ -736,16 +833,90 @@ string scalar _fx_getmode(string scalar envm)
 	return("auto")
 }
 
+// ---------------------------------------------------------------------------- small data
+
+// The small-data cutoff: on unless turned off this session (_fx small off; clear all drops the
+// external and so turns it on again).
+void _fx_setsmall(string scalar v)
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_small_v")) == NULL) p = crexternal("_fx_small_v")
+	*p = v
+}
+
+// For a call of cmd that its _fx_<cmd> found to have few observations: sets local fx_small to 1
+// after counting the call as a fallback (fx_why: "small data", or "mode original" in that mode)
+// and looking up the original (locals fx_prog and fx_err of _fx_orig_prog), so that the caller
+// runs the original right away; to 0 in verify mode (every fast path is to be verified) or when
+// the cutoff is off. envm: the value of env FASTATA_MODE.
+void _fx_small(string scalar cmd, string scalar envm)
+{
+	pointer() scalar p
+	string scalar mode, why
+
+	st_local("fx_small", "0")
+	mode = _fx_getmode(envm)
+	if (mode == "verify") return
+	if ((p = findexternal("_fx_small_v")) != NULL) {
+		if (*p == "off") return
+	}
+	why = (mode == "original" ? "mode original" : "small data")
+	st_local("fx_why", why)
+	_fx_count(cmd, "fallback", why)
+	_fx_orig_prog(cmd)
+	st_local("fx_small", "1")
+}
+
+// A fallback of cmd: counts it and looks up the original (locals fx_prog and fx_err).
+void _fx_fallback(string scalar cmd, string scalar why)
+{
+	_fx_count(cmd, "fallback", why)
+	_fx_orig_prog(cmd)
+}
+
 // ---------------------------------------------------------------------------- verify mode
 
 // Records the pending verification of the running fast path: why it cannot be verified ("" when
-// frame __fx_vsnap holds the snapshot), and the sort and regular random-number states.
-void _fx_vset(string scalar why, string scalar srs, string scalar rs)
+// frame snap holds the snapshot), and the sort and regular random-number states. Drops the
+// snapshot of an earlier fast path that ended without verify, if it is still there.
+void _fx_vset(string scalar why, string scalar srs, string scalar rs, string scalar snap)
 {
 	pointer() scalar p
 
 	if ((p = findexternal("_fx_vrec")) == NULL) p = crexternal("_fx_vrec")
-	*p = (why, srs, rs)
+	else _fx_vdrop(*p)
+	*p = (why, srs, rs, snap)
+}
+
+// A fast path that stops with an error (a failed store, Break in the plugin): forgets its
+// pending verification and drops the snapshot, so that the copy of the data does not stay in
+// memory.
+void _fx_vabort()
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_vrec")) == NULL) return
+	_fx_vdrop(*p)
+	rmexternal("_fx_vrec")
+}
+
+// prefix followed by the smallest number that gives a name no frame has.
+string scalar _fx_vuniq(string scalar prefix)
+{
+	real scalar i
+
+	i = 1
+	while (st_frameexists(prefix + strofreal(i))) i++
+	return(prefix + strofreal(i))
+}
+
+// Drops the snapshot frame of pending verification record r, if it has one and it exists.
+void _fx_vdrop(string rowvector r)
+{
+	if (cols(r) < 4) return
+	if (r[1] != "" | r[4] == "") return
+	if (st_frameexists(r[4]) & r[4] != st_framecurrent()) st_framedrop(r[4])
 }
 
 // Takes the pending verification: locals fx_vframe (the snapshot frame, "" if none), fx_vwhy,
@@ -755,12 +926,15 @@ void _fx_vtake()
 	pointer() scalar p
 	string rowvector r
 
-	if ((p = findexternal("_fx_vrec")) == NULL) r = ("no snapshot", "", "")
+	if ((p = findexternal("_fx_vrec")) == NULL) r = ("no snapshot", "", "", "")
 	else {
 		r = *p
 		rmexternal("_fx_vrec")
 	}
-	st_local("fx_vframe", r[1] == "" ? "__fx_vsnap" : "")
+	if (r[1] == "") {
+		if (!st_frameexists(r[4])) r[1] = "no snapshot"
+	}
+	st_local("fx_vframe", r[1] == "" ? r[4] : "")
 	st_local("fx_vwhy", r[1])
 	st_local("fx_vsrs", r[2])
 	st_local("fx_vrs", r[3])
@@ -1046,6 +1220,7 @@ real scalar _fx_vquick(real scalar j, string scalar snap, real scalar tol, strin
 	string scalar hb)
 {
 	string scalar v, f, cond
+	real scalar rc
 
 	v = st_varname(j)
 	f = "_frval(" + snap + ", " + v + ", _n)"
@@ -1055,7 +1230,9 @@ real scalar _fx_vquick(real scalar j, string scalar snap, real scalar tol, strin
 			f + ") <= " + strofreal(tol, "%21x") + "))")
 	}
 	else return(0)
-	if (_stata("quietly count if " + cond, 1)) return(0)
+	rc = _stata("quietly count if " + cond, 1)
+	if (rc == 1) exit(1)
+	if (rc) return(0)
 	return(st_numscalar("r(N)") == 0)
 }
 
@@ -1092,15 +1269,15 @@ string scalar _fx_vfirst(real colvector diff, | real colvector a, real colvector
 // ---------------------------------------------------------------------------- counters
 
 // Counts a call of cmd: kind fast, fallback, or verify_ok, verify_mismatch, verify_skipped. Sets
-// locals fx_skip (1: a call that an original makes while verify runs it, not counted) and
-// fx_vdrop (1: a fallback after gate took a snapshot, which is no longer needed).
+// local fx_skip (1: a call that an original makes while verify runs it, not counted). A fallback
+// after gate took a snapshot (verify mode) drops the snapshot, which is no longer needed.
 void _fx_count(string scalar cmd, string scalar kind, string scalar why)
 {
 	pointer(transmorphic scalar) scalar pc, pw
+	pointer() scalar pr
 	real rowvector v
 
 	st_local("fx_skip", "0")
-	st_local("fx_vdrop", "0")
 	if (_fx_vin()) {
 		st_local("fx_skip", "1")
 		return
@@ -1121,9 +1298,9 @@ void _fx_count(string scalar cmd, string scalar kind, string scalar why)
 	else {
 		v[2] = v[2] + 1
 		asarray(*pw, cmd, why)
-		if (findexternal("_fx_vrec") != NULL) {
+		if ((pr = findexternal("_fx_vrec")) != NULL) {
+			_fx_vdrop(*pr)
 			rmexternal("_fx_vrec")
-			st_local("fx_vdrop", "1")
 		}
 	}
 	asarray(*pc, cmd, v)

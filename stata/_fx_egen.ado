@@ -9,22 +9,38 @@ program _fx_egen, byable(onecall)
 	version 16
 	local byv
 	if _by() local byv `_byvars'
-	local fx_done 0
-	local fx_reason
-	local fx_vpend 0
-	Fast `caller' `"`byv'"' `0'
-	if "`fx_done'" == "1" {
-		_fx count egen fast
-		capture error 0
-		* verify mode: the original on the snapshot taken by gate; its result is kept
-		if "`fx_vpend'" == "1" {
-			_fx verify egen `caller' `rc0' 0 0 `"`byv'"' `"`_byrc0'"' "`fx_vtol'" "" `"`0'"'
-			if `fx_vrc' exit `fx_vrc'
+	* Small data: below these numbers of observations the original is faster than fastata's
+	* fixed cost per call, so it runs right away (fallback "small data"; off in verify mode and
+	* after _fx small off). Provisional, from perf_profile section 4: by prefix 10000, but 1000
+	* for median(), pctile(), iqr() and rank() (their originals sort within groups); group(),
+	* tag() and by() (hash grouping) 1000; every other form (row functions, no groups) 20000.
+	local fx_small 0
+	if c(N) < 20000 {
+		local fx_k 20000
+		if _by() {
+			local fx_k 10000
+			if ustrregexm(`"`0'"', "=\s*(median|pctile|iqr|rank)\s*\(") local fx_k 1000
 		}
-		exit
+		else if ustrregexm(`"`0'"', "=\s*(group|tag)\s*\(|,.*(^|[\s,])by\s*\(") local fx_k 1000
+		if c(N) < `fx_k' _fx small egen
 	}
-	_fx count egen fallback `"`fx_reason'"'
-	_fx orig egen
+	if !`fx_small' {
+		local fx_done 0
+		local fx_reason
+		local fx_vpend 0
+		Fast `caller' `"`byv'"' `0'
+		if "`fx_done'" == "1" {
+			_fx count egen fast
+			capture error 0
+			* verify mode: the original on the snapshot taken by gate; its result is kept
+			if "`fx_vpend'" == "1" {
+				_fx verify egen `caller' `rc0' 0 0 `"`byv'"' `"`_byrc0'"' "`fx_vtol'" "" `"`0'"'
+				if `fx_vrc' exit `fx_vrc'
+			}
+			exit
+		}
+		_fx fallback egen `"`fx_reason'"'
+	}
 	capture error `rc0'
 	if _by() {
 		version `caller': by `_byvars' `_byrc0': `fx_prog' `0'

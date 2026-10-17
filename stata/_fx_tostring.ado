@@ -7,7 +7,10 @@ program _fx_tostring
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	_fx gate tostring
+	* small data: below 500 observations the original runs right away (see _fx_egen)
+	local fx_small 0
+	if c(N) < 500 _fx small tostring
+	if !`fx_small' _fx gate tostring
 	if `fx_ok' {
 		local fx_why
 		* the original's parsing and error checks; any error runs the original, which reports it
@@ -108,8 +111,7 @@ program _fx_tostring
 			exit
 		}
 	}
-	_fx count tostring fallback `"`fx_why'"'
-	_fx orig tostring
+	if !`fx_small' _fx fallback tostring `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end

@@ -17,7 +17,9 @@
 *       variable: a number, a byte of a str# or strL, a NaN payload, the sign of a zero; or of the
 *       result, which for egen mean() by unsorted groups has the accumulation-class tolerance)
 *       are reported as verify_mismatch in that variable;
-* (iii) the FASTATA_COUNTS lines written by (ii), and the session counts of _fx status.
+* (iii) the FASTATA_COUNTS lines written by (ii), and the session counts of _fx status;
+* (iv)  verify's own frames: none is left behind (also after a failed store), and user frames
+*       named like 0.1.0's fixed ones (__fx_vsnap, __fx_vold) are left alone.
 * Ends with TEST_VERIFY passed.
 version 16
 clear all
@@ -277,7 +279,8 @@ frame drop ld
 di as txt "verify duplicate-value label ok"
 
 * verify mode needs no data: a fast call on a frame other than default, and an error of the
-* fast path (isid) with the original's return code
+* fast path (isid) with the original's return code. No frame is left behind.
+mata: st_local("frames0", invtokens(sort(st_framedir(), 1)'))
 frame create other
 frame other {
 	sysuse auto, clear
@@ -290,8 +293,50 @@ frame other {
 	confirm variable mp
 }
 frame drop other
-capture frame drop __fx_vsnap
-assert _rc == 111
+mata: assert(invtokens(sort(st_framedir(), 1)') == st_local("frames0"))
+
+* the snapshot and swap frames have names of their own: user frames called __fx_vsnap and
+* __fx_vold (the fixed names of 0.1.0, which verify dropped or failed on) are left alone
+frame create __fx_vsnap
+frame __fx_vsnap: quietly set obs 3
+frame create __fx_vold
+frame create other
+frame other {
+	sysuse auto, clear
+	_fx status
+	local vok0 `fx_vok_egen'
+	_fx mode verify
+	egen double mp = mean(price), by(rep78)
+	_fx mode auto
+	_fx status
+	assert `fx_vok_egen' == `vok0' + 1
+	confirm variable mp
+}
+frame __fx_vsnap: assert _N == 3
+frame drop other __fx_vsnap __fx_vold
+mata: assert(invtokens(sort(st_framedir(), 1)') == st_local("frames0"))
+
+* a fast path whose store fails in verify mode (a copy of _fx_xtile that stores with a stale
+* token) drops its new variable and leaves no snapshot behind
+tempfile broken
+mata: l = cat(findfile("_fx_xtile.ado")); i = selectindex(strpos(l, "_fx store " + char(96) + "fx_token'") :> 0); assert(rows(i) == 1); l[i] = subinstr(l[i], char(96) + "fx_token'", "0"); fh = fopen(st_local("broken"), "w"); for (j = 1; j <= rows(l); j++) fput(fh, l[j]); fclose(fh)
+capture program drop _fx_xtile
+run `"`broken'"'
+frame create other
+frame other {
+	sysuse auto, clear
+	_fx mode verify
+	capture xtile q = price, nq(4)
+	assert _rc == 9999
+	capture confirm variable q
+	assert _rc == 111
+	mata: assert(invtokens(sort(st_framedir(), 1)') == invtokens(sort((tokens(st_local("frames0")), "other")', 1)'))
+	_fx mode auto
+}
+frame drop other
+program drop _fx_xtile Fast Parse6 Mark6 Gen6
+mata: assert(invtokens(sort(st_framedir(), 1)') == st_local("frames0"))
+di as txt "verify frames ok"
 
 * (ii) and (iii): a separate process with FASTATA_MODE and FASTATA_COUNTS
 local counts `"`c(pwd)'/tv_counts.csv"'

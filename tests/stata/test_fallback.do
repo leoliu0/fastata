@@ -1,7 +1,9 @@
 * test_fallback.do -- fastata's layer is transparent: with _fx mode original, every replaced
 * command runs its original through the shim, and fx_both finds the same data, output, return
 * code and r() (all of it) as with fastata off, for a grid of specs across the seven commands:
-* by forms, if/in, weights, types, missing codes, string and strL keys, and error cases.
+* by forms, if/in, weights, types, missing codes, string and strL keys, and error cases. Then the
+* small-data cutoff (on: the original, counted as fallback "small data"; off: the fast path), and
+* a store that cannot use the plugin (drops its new variables).
 version 16
 clear all
 set more off
@@ -114,4 +116,59 @@ fb "tostring xf, replace usedisplayformat force" tostring
 fb "tostring g, replace" tostring
 
 _fx mode auto
+
+* the small-data cutoff: with it on, a call on few observations runs the original right away
+* (counted as fallback "small data") with the same data, output and r(); with it off (as
+* fx_setup leaves it), the same call takes the fast path. On data above every cutoff the fast
+* path runs with the cutoff on too.
+frame copy base sm
+frame sm: quietly keep in 1/60
+frame copy sm smg
+frame smg: sort g id
+capture program drop fs
+program fs
+	args cmd ecmd frame opts
+	_fx small on
+	fx_both `"`cmd'"', base(`frame') allr expect(`ecmd' fallback)
+	assert `"`fxb_why'"' == "small data"
+	_fx small off
+	fx_both `"`cmd'"', base(`frame') expect(`ecmd' fast) `opts'
+	global FB_N = $FB_N + 2
+end
+fs "egen double m = mean(x1), by(g)" egen sm tol(1e-13)
+fs "by g: egen double m = mean(x1)" egen smg tol(1e-13)
+fs "egen double rt = rowtotal(x1 x2)" egen sm
+fs "egen gg = group(s g)" egen sm
+fs "isid id" isid sm
+fs "duplicates report g" duplicates sm allr
+fs "duplicates tag g, gen(dt)" duplicates sm allr
+fs "xtile q = x1, nq(4)" xtile sm
+fs "pctile double p = x1, nq(4)" pctile sm
+fs "destring sn, replace force" destring sm
+fs "tostring zi, gen(zs)" tostring sm
+_fx small on
+fx_both "egen double m = mean(x1), by(g)", base(base) expect(egen fast) tol(1e-13)
+_fx small off
+global FB_N = $FB_N + 1
+frame drop sm smg
+
+* _fx store drops the new (nofill) variables and fails when _fx_call cannot use the plugin (a
+* copy of _fx_call that expects another plugin version): no unwritten variable is left
+frame copy base st
+frame st {
+	tempfile badcall
+	mata: l = cat(findfile("_fx_call.ado")); i = selectindex(strpos(l, "local fx_version ") :> 0); assert(rows(i) == 1); l[i] = char(9) + "local fx_version 9.9.9"; fh = fopen(st_local("badcall"), "w"); for (j = 1; j <= rows(l); j++) fput(fh, l[j]); fclose(fh)
+	capture program drop _fx_call
+	run `"`badcall'"'
+	local k0 = c(k)
+	capture _fx store 1 double newv
+	assert _rc == 9999
+	assert c(k) == `k0'
+	capture confirm variable newv
+	assert _rc == 111
+	program drop _fx_call _fx_plugin
+}
+frame drop st
+global FB_N = $FB_N + 1
+
 di as result "TEST_FALLBACK passed $FB_N specs"
