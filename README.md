@@ -16,8 +16,9 @@ fastata enable
 
 `fastata enable` adds a few lines to your `profile.do`, so fastata is on in every new session.
 `fastata disable` removes them; `fastata off` / `fastata on` switch it for the current session;
-`fastata status` shows what ran fast in this session. Update with `ado update fastata, update`.
-See `help fastata`.
+`fastata status` shows what ran fast in this session. Update with `ado update fastata, update`,
+then restart Stata: the session that updated keeps running the version it loaded (from 0.1.0,
+`fastata on` in that session stops with `r(111)`). See `help fastata`.
 
 ## What is replaced
 
