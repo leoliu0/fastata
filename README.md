@@ -47,7 +47,7 @@ reproduced; and `egen` sums, means and standard deviations within groups of unso
 a relative 1e-13 (one unit in the last place for float), because the original's own sums depend
 on the random order of ties in its internal sort.
 
-This is checked against the originals by 2,051 specifications across the seven commands, a
+This is checked against the originals by 2,055 specifications across the seven commands, a
 randomized test of 3,000 cases, bitwise calibrations of `_pctile`, `summarize`, `real()`,
 `compress` and `string()`, and 100 published replication packages (QJE, JPE, REStat, RFS, REStud
 and EJ; [repl/RESULTS.md](repl/RESULTS.md)), each run without fastata and with fastata in verify
