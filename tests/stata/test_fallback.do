@@ -171,4 +171,35 @@ frame st {
 frame drop st
 global FB_N = $FB_N + 1
 
+* a do-file that resets the ado-path after fastata's programs were loaded leaves the runtime
+* directory off the path; _fx_call (here dropped, as if it had never been loaded) can then not
+* be found, so a call that would take the fast path runs the original instead (reason
+* "runtime directory off the ado-path"), with the original's results
+frame copy base ap
+frame ap {
+	quietly fastata off
+	set sortseed 1
+	egen double m0 = mean(x1), by(g)
+	quietly fastata on
+	isid id
+	egen double m1 = mean(x1), by(g)
+	drop m1
+	capture program drop _fx_call
+	local ado0 `"$S_ADO"'
+	global S_ADO "BASE;SITE;.;PERSONAL;PLUS;OLDPLACE"
+	capture noisily isid id2
+	local rc1 = _rc
+	set sortseed 1
+	capture noisily egen double m = mean(x1), by(g)
+	local rc2 = _rc
+	global S_ADO `"`ado0'"'
+	assert `rc1' == 459 & `rc2' == 0
+	assert m == m0
+	_fx status
+	assert `"`fx_last_isid'"' == "runtime directory off the ado-path"
+	assert `"`fx_last_egen'"' == "runtime directory off the ado-path"
+}
+frame drop ap
+global FB_N = $FB_N + 1
+
 di as result "TEST_FALLBACK passed $FB_N specs"

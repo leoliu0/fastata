@@ -802,7 +802,10 @@ void _fx_gate_check(string scalar key, string scalar envm)
 	ck = key + char(0) + _fx_state()
 	if (asarray_contains(*pv, ck)) v = asarray(*pv, ck)
 	else {
-		v = _fx_verdict(key)
+		// no runtime directory on the ado-path (a do-file reset it after fastata's programs
+		// were loaded): the fast path could not load the programs it calls (_fx_call)
+		if (_fx_info()[1] == "") v = ("0", "runtime directory off the ado-path")
+		else v = _fx_verdict(key)
 		asarray(*pv, ck, v)
 	}
 	st_local("fx_ok", v[1])
