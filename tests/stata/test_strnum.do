@@ -96,6 +96,45 @@ frame tiny {
 }
 frame create empty
 frame empty: gen str4 a = ""
+* the converted variable first, last and in between (replace puts the new variable where the
+* old one was), with characteristics, notes and labels on it; and the same data sorted
+frame create edge
+frame edge {
+	set obs 300
+	gen str6 s1 = string(_n * 7)
+	gen double n1 = _n - 100
+	gen str6 s2 = string(mod(_n, 13))
+	gen long n2 = _n * 3
+	gen str6 s3 = string(-_n)
+	char s1[foo] bar
+	note s3: a note on s3
+	label variable s3 "the last one"
+	char n1[who] me
+	note n2: a note on n2
+	label variable n1 "the first numeric"
+}
+frame copy edge edgesort
+frame edgesort: sort s1 n2
+frame create edge2
+frame edge2 {
+	set obs 300
+	gen long n1 = _n
+	gen str6 s1 = string(_n)
+	gen double n2 = -_n
+	char n1[foo] bar
+	note n2: a note on n2
+	label variable n2 "the last one"
+}
+frame copy edge2 edge2sort
+frame edge2sort: sort n1
+
+* runs a command, then shows the c(rc) it leaves
+capture program drop rcshow
+program rcshow
+	version 16
+	`0'
+	di as txt "c(rc) afterwards: " c(rc)
+end
 
 capture program drop ts
 program ts
@@ -347,5 +386,31 @@ ts "tostring xb, replace" fast tostring bnan
 ts "destring sa, replace" fast destring bnan
 ts "destring sa zn, replace" fast destring bnan
 
+
+* ---------------------------------------------------------------- replace: variable order
+ts "destring s1 s3, replace" fast destring edge
+ts "destring s3 s2 s1, replace" fast destring edge
+ts "destring s1 s2 s3, gen(g1 g2 g3)" fast destring edge
+ts "destring, replace" fast destring edge
+ts "destring s1 s3, replace" fast destring edgesort
+ts "destring s2, replace" fast destring edgesort
+ts "tostring n1 n2, replace" fast tostring edge2
+ts "tostring n2 n1, replace" fast tostring edge2
+ts "tostring n1 n2, gen(t1 t2)" fast tostring edge2
+ts "tostring n1, replace" fast tostring edge2sort
+ts "tostring n2, replace" fast tostring edge2sort
+ts "tostring n1 n2, replace" fast tostring edge
+
+* ---------------------------------------------------------------- c(rc) left behind
+ts "rcshow destring sa, replace" fast destring
+ts "rcshow destring sa id, replace" fast destring
+ts "rcshow destring id sa, gen(n1 n2)" fast destring
+ts "rcshow destring sn, replace" fast destring
+ts `"rcshow destring sc, gen(nc) ignore("$,")"' fast destring
+ts "rcshow destring s1 n1, replace" fast destring edge
+ts "rcshow tostring xb, replace" fast tostring
+ts "rcshow tostring xb sa, replace" fast tostring
+ts "rcshow tostring sa xb, gen(a2 b2)" fast tostring
+ts "rcshow tostring xl, replace" fast tostring
 
 di as result "TEST_STRNUM passed $TS_N specs"
