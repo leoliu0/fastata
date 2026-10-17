@@ -10,7 +10,15 @@ program _fx_duplicates, rclass
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'
-	_fx gate duplicates
+	* small data (below 500 observations): the original right away (see _fx gate)
+	_fx gate duplicates `=c(N) < 500'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		capture noisily version `caller': `fx_prog' `0'
+		local rc = _rc
+		return add
+		exit `rc'
+	}
 	if `fx_ok' {
 		local fx_why
 		local sub
@@ -153,8 +161,7 @@ program _fx_duplicates, rclass
 		if "`tv'" != "" drop `tv'
 		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
 	}
-	_fx count duplicates fallback `"`fx_why'"'
-	_fx orig duplicates
+	_fx fallback duplicates `"`fx_why'"'
 	local 0 `"`cmdline'"'
 	capture error `rc0'
 	* under capture, so that r() set by the original before an error (r(N) before error 2000)

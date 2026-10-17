@@ -746,6 +746,8 @@ di as txt "original without the runtime directory ok"
 * ---------------------------------------------------------------------------------------------
 foreach how in "clear all" discard {
 	`how'
+	* (clear all turns the small-data cutoff on again; these calls are on 74 observations)
+	_fx small off
 	quietly findfile egen.ado
 	assert `"`r(fn)'"' == `"`rt'egen.ado"'
 	_fx status

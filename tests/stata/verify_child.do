@@ -26,8 +26,10 @@ assert `fx_nfast_egen' == 0
 sysuse auto, clear
 xtile q = price, nq(4)
 
-* _fx mode overrides the env var for the session
+* _fx mode overrides the env var for the session (the small-data cutoff, which clear all turned
+* on again, would run the original on these 74 observations)
 _fx mode auto
+_fx small off
 _fx status
 assert "`fx_mode'" == "auto"
 xtile q2 = price, nq(4)

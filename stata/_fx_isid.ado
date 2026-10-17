@@ -3,13 +3,19 @@
 *! no string key value starts or ends with a blank or a non-ASCII byte. The plugin counts the
 *! observations with a missing key and the distinct key tuples; the two errors of the original
 *! (missing key, key not unique) are raised here with the original's messages. Everything else
-*! runs the original.
+*! runs the original, right away below 150 observations (small data: there the original is
+*! faster than fastata's fixed cost per call; see _fx gate).
 program _fx_isid
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
+	_fx gate isid `=c(N) < 150'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	local cmdline `"`0'"'
-	_fx gate isid
 	if `fx_ok' {
 		local fx_why
 		foreach word of local 0 {
@@ -74,8 +80,7 @@ program _fx_isid
 			exit
 		}
 	}
-	_fx count isid fallback `"`fx_why'"'
-	_fx orig isid
+	_fx fallback isid `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end
