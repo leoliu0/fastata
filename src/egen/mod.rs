@@ -16,7 +16,7 @@ use crate::args::Args;
 use crate::cache::{self, Output, read_cols};
 use crate::error::{Error, Res, vec_filled};
 use crate::io::{self, Io, Rows};
-use crate::par::{Shared, for_chunks, threads_for_rows};
+use crate::par::{Shared, for_chunks};
 
 use groups::{Groups, for_groups, group_column, hashed_groups, one_group, read_touse, sorted_groups, tag_column};
 use spec::{Fcn, RankMode, Spec, Ty, miss_count};
@@ -283,8 +283,9 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, usi
     let numv: Vec<i32> = s.vals.iter().zip(&strs).filter(|(_, s)| !**s).map(|(v, _)| *v).collect();
     let nn = numv.len();
     let mut out = vec_filled(n, miss)?;
-    let threads = threads_for_rows(s.threads, n.saturating_mul(nn.max(1)));
-    let counts = for_chunks(io, &mut [&mut out[..]], ROW_BLOCK, threads, |b, ch| {
+    // one thread per block: a row function reads and combines several values per observation,
+    // enough work for a thread of its own per block (measured faster than one per 65,536 rows)
+    let counts = for_chunks(io, &mut [&mut out[..]], ROW_BLOCK, s.threads, |b, ch| {
         let res = &mut *ch[0];
         let first = b * ROW_BLOCK;
         let m = res.len();

@@ -1,5 +1,5 @@
 {smcl}
-{* *! version 0.1.0  15oct2026}{...}
+{* *! version 0.1.1  17oct2026}{...}
 {vieweralsosee "[D] egen" "help egen"}{...}
 {vieweralsosee "[D] isid" "help isid"}{...}
 {vieweralsosee "[D] duplicates" "help duplicates"}{...}
@@ -54,12 +54,18 @@ checks the original ado-files: if your Stata has versions of them other than the
 a {cmd:fastata} update verifies the new versions.
 
 {phang}
-{opt enable} turns {cmd:fastata} on now and in every future Stata session, by adding a few
-lines to your {cmd:profile.do} (the one Stata runs at startup; if you have none, it is created in
-your PERSONAL directory). Run it once after installing.
+{opt enable} turns {cmd:fastata} on now and in every future Stata session, by adding three
+lines to the {cmd:profile.do} Stata runs at startup (if you have none, it is created in your
+PERSONAL directory). A {cmd:profile.do} it changes is first saved as
+{it:profile.do}{cmd:.fastata.bak}; your own lines in it stay as they are. Run it once after
+installing.
 
 {phang}
-{opt disable} turns {cmd:fastata} off and removes those lines from {cmd:profile.do}.
+{opt disable} turns {cmd:fastata} off and removes those lines from the {cmd:profile.do} files
+that have them, the one in the current directory included. Startup lines left in any other
+{cmd:profile.do} no longer turn {cmd:fastata} on ({opt enable} undoes this). Stata sessions that
+are already open keep working. To remove {cmd:fastata} completely, type {cmd:fastata disable}
+and {cmd:ado uninstall fastata}, then delete the directory {cmd:fastata} in your PLUS directory.
 
 {phang}
 {opt on} and {opt off} turn {cmd:fastata} on or off for the current session only. With
@@ -84,14 +90,23 @@ in particular for:
 {cmd:mean}, {cmd:median}, {cmd:min}, {cmd:pctile}, {cmd:rank}, {cmd:rowmax}, {cmd:rowmean},
 {cmd:rowmin}, {cmd:rowmiss}, {cmd:rownonmiss}, {cmd:rowsd}, {cmd:rowtotal}, {cmd:sd},
 {cmd:std}, {cmd:sum}, {cmd:tag} and {cmd:total}; expressions with {cmd:_n}, {cmd:_N},
-subscripts, time-series operators, random numbers, {cmd:r()} or {cmd:sum()}; string results;
+subscripts, time-series operators (chains such as {cmd:LD.} included), random numbers,
+{cmd:regexs()}, {cmd:ustrregexs()}, {cmd:regexcapture()}, {cmd:r()}, {cmd:s()} or {cmd:sum()};
+sums, means, standard deviations or differences whose intermediate results go beyond Stata's
+largest number (about 8.99e307 in absolute value); string results;
 integer result types that the values do not fit; options {cmd:autotype}, {cmd:label},
 {cmd:lname}, {cmd:truncate}, {cmd:unique}, {cmd:suffix}{p_end}
-{p2col:{helpb isid}}the {cmd:using} form{p_end}
-{p2col:{helpb duplicates}}{cmd:browse}, and the error cases of the other subcommands{p_end}
+{p2col:{helpb isid}}the {cmd:using} form; string keys with a value that starts or ends with a
+blank or a non-ASCII byte{p_end}
+{p2col:{helpb duplicates}}{cmd:browse}; the error cases of the other subcommands;
+{cmd:s()}, {cmd:regexs()}, {cmd:ustrregexs()} or {cmd:regexcapture()} in {cmd:if};
+{cmd:report}, {cmd:examples} and {cmd:list} when 100 frames are already defined{p_end}
 {p2col:{helpb xtile}, {helpb pctile}}{cmd:cutpoints()}, {cmd:genp()}, {cmd:iweight}s,
-{cmd:nquantiles()} above 1001, and weighted percentiles within rounding distance of a
-cumulative weight{p_end}
+{cmd:nquantiles()} above 1001, {cmd:pctile} of a list of variables, weighted percentiles
+within rounding distance of a cumulative weight, percentiles or total weights beyond Stata's
+largest number; {cmd:s()}, {cmd:regexs()}, {cmd:ustrregexs()} or {cmd:regexcapture()} in the
+expression or {cmd:if}, and {cmd:r()} in an {cmd:xtile} expression with
+{cmd:nquantiles()}{p_end}
 {p2col:{helpb destring}}non-ASCII values, values Stata reads as hexadecimal numbers,
 numbers longer than 64 characters or beyond Stata's range, calls under {cmd:version} 10 or
 older{p_end}
@@ -101,7 +116,21 @@ and {cmd:%}{it:W}{cmd:.0f}, and non-integer values{p_end}
 
 {pstd}
 Binary strL values, NaN values (which a plugin or Mata can store) in a variable the command
-reads, and datasets with 2^32 or more observations always run the original.
+reads, and datasets with more than 2,147,483,647 observations (the plugin interface sees only
+the low 32 bits of {cmd:_N}) always run the original.
+
+{pstd}
+With few observations the original runs right away, because there it is faster than
+{cmd:fastata}'s fixed cost per call. For {cmd:egen} the limits are 1,000 observations for
+{cmd:median()}, {cmd:pctile()}, {cmd:iqr()} and {cmd:rank()} with the {cmd:by} prefix and
+20,000 for its other functions with the {cmd:by} prefix; otherwise 1,000 for {cmd:group()},
+{cmd:tag()}, {cmd:rank()}, {cmd:rowmean()} and {cmd:rowsd()}, 2,000 for other functions with
+the {cmd:by()} option, 5,000 for {cmd:median()}, {cmd:pctile()} and {cmd:iqr()}, 50,000 for
+{cmd:rowtotal()}, {cmd:rowmin()}, {cmd:rowmax()}, {cmd:rowmiss()} and {cmd:rownonmiss()}, and
+20,000 for the rest. They are 100 for {cmd:isid}; 500 for {cmd:duplicates tag} and 200 for the
+other {cmd:duplicates} subcommands; 2,000 for {cmd:pctile}; 200 for {cmd:destring}; 500 for
+{cmd:tostring}; {cmd:xtile} has none. In verify mode (see {help fastata##remarks:Remarks}) every
+size takes the fast path.
 
 
 {marker contract}{...}
@@ -125,7 +154,11 @@ may differ: the original's follows the random order of these ties.
 
 {phang2}
 2. Results that commands not documented as storing results leave behind in {cmd:r()} (for
-example after {cmd:egen}, {cmd:xtile} or {cmd:destring}) are not reproduced.
+example after {cmd:egen}, {cmd:xtile} or {cmd:destring}) are not reproduced. After {cmd:xtile}
+and {cmd:pctile}, {cmd:s()} holds the result of {cmd:fastata}'s own parsing of the weight, not
+that of the original's inner {cmd:pctile} call. After a {cmd:duplicates} call that runs the
+original and succeeds, {cmd:c(rc)} is 0, where the original (other than {cmd:duplicates tag})
+leaves the value it had before the call.
 
 {phang2}
 3. {cmd:egen}'s {cmd:total}, {cmd:sum}, {cmd:mean}, {cmd:sd} and {cmd:std} computed within
@@ -140,14 +173,20 @@ original's.
 
 {pstd}
 {cmd:fastata} uses all processors of your Stata/MP licence, or all logical processors with
-Stata/SE and Stata/BE. Results do not depend on the number of processors.
+Stata/SE and Stata/BE, and fewer on small data (one per 65,536 observations). Results do not
+depend on the number of processors.
 
 {pstd}
 {cmd:fastata} replaces the commands through Stata's ado-path: {cmd:fastata on} puts a
 directory with its versions of the seven ado-files first on the ado-path, so that
 {cmd:which egen} shows {cmd:fastata}'s file. Programs that call the commands use them too.
 A {cmd:profile.do} in the directory where Stata starts takes precedence over the one
-{cmd:fastata enable} writes; {cmd:fastata enable} tells you when this happens.
+{cmd:fastata enable} writes; {cmd:fastata enable} tells you when this happens. If a do-file
+resets the ado-path after {cmd:fastata}'s programs were loaded (for example with
+{cmd:global S_ADO}), the original commands run. When {cmd:fastata}'s directory cannot hold
+the renamed originals (it is read-only, was removed by another session, or is off the
+ado-path), they are written to a directory {cmd:fastata_}{it:*} in {cmd:c(tmpdir)}, which is
+added to the end of the ado-path and is not removed when Stata exits.
 
 {pstd}
 If you suspect {cmd:fastata} in a result, run the command again after {cmd:fastata off}.
