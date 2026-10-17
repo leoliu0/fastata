@@ -1,13 +1,12 @@
 //! Sample groups for egen: the sample observations grouped by the keys (or one group without
-//! keys), observations ascending within each group; the parallel driver over groups; and group
-//! numbering in Stata's sort order for `group()`.
+//! keys), observations ascending within each group; the parallel driver over groups; and the
+//! `tag()` and `group()` columns (group numbers in Stata's sort order of the keys).
 
-use std::cmp::Ordering;
+use std::marker::PhantomData;
 
-use crate::cache::read_cols;
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
-use crate::group::{default_hash, hash_groups, sorted_starts};
-use crate::io::{Io, Rows};
+use crate::error::{Res, vec_filled, vec_with_capacity};
+use crate::group::{KEY_CHUNK, Keyed, Need, ReadOpts, RepKeys, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, sorted_starts};
+use crate::io::Io;
 use crate::par::{StoreMode, for_blocks};
 
 /// Sample observations of each group: group `g` is `ord[starts[g]..starts[g + 1]]`, ascending.
@@ -27,31 +26,30 @@ impl Groups {
     }
 }
 
-fn check_n(n: usize) -> Res<()> {
-    if n > u32::MAX as usize {
-        return Err(Error::fallback("over 4294967295 observations"));
-    }
-    Ok(())
-}
-
 /// Sample marker per observation (`touse` != 0), or `None` without a marker.
 pub fn read_touse<I: Io>(io: &I, touse: Option<i32>, threads: usize) -> Res<Option<Vec<bool>>> {
-    let Some(t) = touse else { return Ok(None) };
-    let col = read_cols(io, &[t], threads)?.pop().unwrap_or_default();
-    Ok(Some(col.iter().map(|&v| v != 0.0).collect()))
+    touse.map(|t| read_flags(io, t, threads)).transpose()
+}
+
+/// The sample observations, ascending.
+fn sample_list(n: usize, touse: Option<&[bool]>) -> Res<Vec<u32>> {
+    match touse {
+        None => {
+            let mut o = vec_with_capacity(n)?;
+            o.extend(0..n as u32);
+            Ok(o)
+        }
+        Some(t) => {
+            let mut o = vec_with_capacity(t.iter().filter(|&&b| b).count())?;
+            o.extend((0..n as u32).filter(|&i| t[i as usize]));
+            Ok(o)
+        }
+    }
 }
 
 /// Every sample observation as one group (none when the sample is empty).
 pub fn one_group(n: usize, touse: Option<&[bool]>) -> Res<Groups> {
-    check_n(n)?;
-    let ord: Vec<u32> = match touse {
-        None => {
-            let mut o = vec_with_capacity(n)?;
-            o.extend(0..n as u32);
-            o
-        }
-        Some(t) => (0..n as u32).filter(|&i| t[i as usize]).collect(),
-    };
+    let ord = sample_list(n, touse)?;
     let starts = if ord.is_empty() { vec![0] } else { vec![0, ord.len()] };
     Ok(Groups { ord, starts })
 }
@@ -60,64 +58,160 @@ pub fn one_group(n: usize, touse: Option<&[bool]>) -> Res<Groups> {
 /// −0 equals +0, `.` differs from `.a`), restricted to the sample.
 pub fn sorted_groups<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, threads: usize) -> Res<Groups> {
     let n = io.nobs();
-    check_n(n)?;
     let runs = sorted_starts(io, keys, n, threads)?;
+    let ord = sample_list(n, touse)?;
     let Some(t) = touse else {
-        let mut ord = vec_with_capacity(n)?;
-        ord.extend(0..n as u32);
         let starts = if n == 0 { vec![0] } else { runs };
         return Ok(Groups { ord, starts });
     };
-    let mut ord = vec_with_capacity(t.iter().filter(|&&b| b).count())?;
-    let mut starts = vec![0];
+    let mut starts = vec_with_capacity(runs.len())?;
+    starts.push(0);
+    let mut acc = 0;
     for w in runs.windows(2) {
-        let before = ord.len();
-        ord.extend((w[0]..w[1]).filter(|&i| t[i]).map(|i| i as u32));
-        if ord.len() > before {
-            starts.push(ord.len());
+        let k = t[w[0]..w[1]].iter().filter(|&&b| b).count();
+        if k > 0 {
+            acc += k;
+            starts.push(acc);
         }
     }
     Ok(Groups { ord, starts })
 }
 
+/// The keys of the sample (missing flags when `miss`).
+fn keyed_sample<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, threads: usize, miss: bool) -> Res<Keyed> {
+    let samp = touse.map(|t| sample_from_bools(io, t, threads)).transpose()?;
+    Keyed::read(io, keys, samp, threads, ReadOpts { miss, blanks: false })
+}
+
 /// Groups of unsorted data by `keys` (numeric, str# or strL), restricted to the sample.
-pub fn hashed_groups<I: Io>(io: &I, keys: &[i32], touse_var: Option<i32>, touse: Option<&[bool]>, threads: usize) -> Res<Groups> {
-    let n = io.nobs();
-    check_n(n)?;
-    let ns = touse.map_or(n, |t| t.iter().filter(|&&b| b).count());
-    let g = hash_groups(io, keys, touse_var, threads, default_hash)?;
-    // Sample groups come first; the non-sample observations form one final range.
-    let mut starts = g.starts;
-    while starts.last().is_some_and(|&s| s > ns) {
-        starts.pop();
+pub fn hashed_groups<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, threads: usize) -> Res<Groups> {
+    let kd = keyed_sample(io, keys, touse, threads, false)?;
+    let g = kd.group(io, threads, Need { ord: true, ..Need::default() })?;
+    Ok(Groups { ord: g.ord, starts: g.starts })
+}
+
+/// `tag()`: 1 on the lowest sample observation of each group of `keys` (without `missing`, of
+/// each group whose keys are all nonmissing), 0 elsewhere.
+pub fn tag_column<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, missing: bool, threads: usize) -> Res<Vec<f64>> {
+    let kd = keyed_sample(io, keys, touse, threads, !missing)?;
+    let g = kd.group(io, threads, Need { reps: true, ..Need::default() })?;
+    let mut out = vec_filled(io.nobs(), 0.0)?;
+    let sh = Shared::new(&mut out);
+    par_for(io, g.ngroups, threads, |gi| {
+        let r = g.reps[gi] as usize;
+        if missing || !kd.missing(r) {
+            // SAFETY: each group has its own lowest observation.
+            unsafe { sh.set(kd.obs(r), 1.0) };
+        }
+        Ok(())
+    })?;
+    Ok(out)
+}
+
+/// `group()`: group numbers 1..K in Stata's sort order of the key tuples (numbers ascending with
+/// −0 = +0 and missing codes after every number, `.` < `.a` < ... < `.z`; strings bytewise with a
+/// prefix first; lexicographic in varlist order), over the sample observations (without
+/// `missing`, those whose keys are all nonmissing); `.` elsewhere. Each number is stored as
+/// `cast(number)`. Also returns, without `missing`, whether each key is numeric and integer at
+/// every observation numbered (empty with `missing`).
+pub fn group_column<I, C>(io: &I, keys: &[i32], touse: Option<&[bool]>, missing: bool, threads: usize, cast: C) -> Res<(Vec<f64>, Vec<bool>)>
+where
+    I: Io,
+    C: Fn(f64) -> Res<f64> + Sync,
+{
+    let kd = keyed_sample(io, keys, touse, threads, !missing)?;
+    let g = kd.group(io, threads, Need { gid: true, reps: true, ..Need::default() })?;
+    let kept = |gi: usize| missing || !kd.missing(g.reps[gi] as usize);
+    let mut keep = vec_with_capacity((0..g.ngroups).filter(|&gi| kept(gi)).count())?;
+    keep.extend((0..g.ngroups as u32).filter(|&gi| kept(gi as usize)));
+    let rk = kd.rep_keys(io, &g.reps, threads)?;
+    let numbers = group_numbers(io, &rk, &keep, g.ngroups, threads)?;
+    let mut keyint = Vec::new();
+    if !missing {
+        for k in 0..keys.len() {
+            let ints = par_map(io, keep.len().div_ceil(KEY_CHUNK), threads, |c| {
+                let lo = c * KEY_CHUNK;
+                let hi = (lo + KEY_CHUNK).min(keep.len());
+                Ok(keep[lo..hi].iter().all(|&gi| rk.view().is_int(k, rk.pos(gi as usize))))
+            })?;
+            keyint.push(ints.iter().all(|&b| b));
+        }
     }
-    let mut ord = g.ord;
-    ord.truncate(ns);
-    if starts.last() != Some(&ns) {
-        return Err(Error::new(9999, "fastata: internal error (egen grouping); please report it"));
-    }
-    Ok(Groups { ord, starts })
+    let mut out = vec_filled(io.nobs(), io.missval())?;
+    let sh = Shared::new(&mut out);
+    par_for(io, kd.len(), threads, |p| {
+        let k = numbers[g.gid[p] as usize];
+        if k > 0 {
+            // SAFETY: each sample position is its own observation.
+            unsafe { sh.set(kd.obs(p), cast(f64::from(k))?) };
+        }
+        Ok(())
+    })?;
+    Ok((out, keyint))
+}
+
+/// Number (1..) of each group of `keep` in Stata's sort order of its keys; 0 for the other
+/// groups of `0..ngroups`. Keys are distinct between groups, so the order is total and the
+/// numbers do not depend on the thread count.
+fn group_numbers<I: Io>(io: &I, rk: &RepKeys<'_>, keep: &[u32], ngroups: usize, threads: usize) -> Res<Vec<u32>> {
+    let view = rk.view();
+    let k = keep.len();
+    let order: Vec<u32> = if view.nkeys() == 1 && view.nnum() == 1 {
+        // one numeric key: sort (order key, group) pairs
+        let mut pairs = par_map(io, k, threads, |i| Ok((view.num_okey(rk.pos(keep[i] as usize), 0), keep[i])))?;
+        par_sort_by(io, &mut pairs, threads, |a, b| a.cmp(b))?;
+        par_map(io, k, threads, |i| Ok(pairs[i].1))?
+    } else if view.nkeys() == view.nnum() {
+        // numeric keys: rows of order keys, flat
+        let nn = view.nnum();
+        let mut rows = vec_filled(k * nn, 0u64)?;
+        let sh = Shared::new(&mut rows);
+        par_for(io, k, threads, |i| {
+            let p = rk.pos(keep[i] as usize);
+            for j in 0..nn {
+                // SAFETY: row i is written by the chunk that holds i only.
+                unsafe { sh.set(i * nn + j, view.num_okey(p, j)) };
+            }
+            Ok(())
+        })?;
+        let mut idx = par_map(io, k, threads, |i| Ok(i as u32))?;
+        par_sort_by(io, &mut idx, threads, |&a, &b| rows[a as usize * nn..][..nn].cmp(&rows[b as usize * nn..][..nn]))?;
+        par_map(io, k, threads, |i| Ok(keep[idx[i] as usize]))?
+    } else {
+        let mut idx = vec_with_capacity(k)?;
+        idx.extend_from_slice(keep);
+        par_sort_by(io, &mut idx, threads, |&a, &b| view.cmp(rk.pos(a as usize), rk.pos(b as usize)))?;
+        idx
+    };
+    let mut numbers = vec_filled(ngroups, 0u32)?;
+    let sh = Shared::new(&mut numbers);
+    par_for(io, k, threads, |r| {
+        // SAFETY: each group appears once in `order`.
+        unsafe { sh.set(order[r] as usize, r as u32 + 1) };
+        Ok(())
+    })?;
+    Ok(numbers)
 }
 
 /// Output column shared by the workers of [`for_groups`]: each observation is written by the one
 /// worker that owns its group.
-pub struct Scatter {
+pub struct Scatter<'a> {
     ptr: *mut f64,
     len: usize,
+    _out: PhantomData<&'a mut [f64]>,
 }
 
-unsafe impl Sync for Scatter {}
+unsafe impl Sync for Scatter<'_> {}
 
-impl Scatter {
-    pub fn new(out: &mut [f64]) -> Scatter {
-        Scatter { ptr: out.as_mut_ptr(), len: out.len() }
+impl<'a> Scatter<'a> {
+    pub fn new(out: &'a mut [f64]) -> Scatter<'a> {
+        Scatter { ptr: out.as_mut_ptr(), len: out.len(), _out: PhantomData }
     }
 
     /// Writes observation `i`.
     ///
     /// # Safety
-    /// No other thread reads or writes observation `i` while the [`Scatter`] is in use, and the
-    /// output slice outlives it.
+    /// No other thread reads or writes observation `i` while the [`Scatter`] is in use.
     #[inline]
     pub unsafe fn set(&self, i: u32, v: f64) {
         let i = i as usize;
@@ -130,103 +224,40 @@ impl Scatter {
 const ITEM_OBS: usize = 16_384;
 
 /// Runs `f(g, members, scratch)` for every group, in parallel over items of whole groups; each
-/// item has its own scratch vector. Deterministic: groups are independent.
+/// item has its own scratch vector, with room for its largest group. Deterministic: groups are
+/// independent.
 pub fn for_groups<I, F>(io: &I, g: &Groups, threads: usize, f: F) -> Res<()>
 where
     I: Io,
     F: Fn(usize, &[u32], &mut Vec<f64>) -> Res<()> + Sync,
 {
-    let mut items = vec![0usize];
+    let cut = |acc: usize| acc >= ITEM_OBS;
+    let mut nitems = 0;
     let mut acc = 0;
     for gi in 0..g.len() {
         acc += g.starts[gi + 1] - g.starts[gi];
-        if acc >= ITEM_OBS {
+        if cut(acc) || gi + 1 == g.len() {
+            nitems += 1;
+            acc = 0;
+        }
+    }
+    let mut items = vec_with_capacity(nitems + 1)?;
+    items.push(0usize);
+    acc = 0;
+    for gi in 0..g.len() {
+        acc += g.starts[gi + 1] - g.starts[gi];
+        if cut(acc) || gi + 1 == g.len() {
             items.push(gi + 1);
             acc = 0;
         }
     }
-    if *items.last().unwrap_or(&0) != g.len() {
-        items.push(g.len());
-    }
-    for_blocks(io, items.len() - 1, threads, StoreMode::Parallel, |it, _emit| {
-        let mut scratch = Vec::new();
+    for_blocks(io, nitems, threads, StoreMode::Parallel, |it, _emit| {
+        let largest = (items[it]..items[it + 1]).map(|gi| g.starts[gi + 1] - g.starts[gi]).max().unwrap_or(0);
+        let mut scratch = vec_with_capacity(largest)?;
         for gi in items[it]..items[it + 1] {
             f(gi, g.members(gi), &mut scratch)?;
         }
         Ok(())
     })?;
     Ok(())
-}
-
-/// A key value of one group (its first observation).
-#[derive(Clone, PartialEq, Debug)]
-pub enum KeyVal {
-    Num(f64),
-    Str(Vec<u8>),
-}
-
-/// For each group of `g` (grouped by `keys`): whether any key is missing (numeric `.`-`.z`,
-/// string ""), and its rank (0-based) in Stata's sort order of the key tuples among the groups
-/// with `keep[g]`: numbers ascending (−0 = +0, missing codes after every number in the order
-/// `.` < `.a` < ... < `.z`), strings bytewise with a prefix first, tuples lexicographic.
-pub struct KeyInfo {
-    pub has_missing: Vec<bool>,
-}
-
-pub fn key_info<I: Io>(io: &I, keys: &[i32], g: &Groups) -> Res<(KeyInfo, Vec<Vec<KeyVal>>)> {
-    let miss = io.missval();
-    let reps: Vec<u32> = (0..g.len()).map(|i| g.ord[g.starts[i]]).collect();
-    let k = g.len();
-    let numv: Vec<i32> = keys.iter().copied().filter(|&v| !io.is_str(v)).collect();
-    let mut nums = vec_filled(k * numv.len(), 0.0)?;
-    if !numv.is_empty() && k > 0 {
-        io.read_block(&numv, Rows::List(&reps), &mut nums)?;
-    }
-    let mut tuples: Vec<Vec<KeyVal>> = vec_with_capacity(k)?;
-    let mut has_missing = vec_filled(k, false)?;
-    for (gi, &o) in reps.iter().enumerate() {
-        let mut t = Vec::with_capacity(keys.len());
-        let mut j = 0;
-        for &v in keys {
-            if io.is_str(v) {
-                let mut s = Vec::new();
-                io.read_str(v, o as usize, &mut s)?;
-                has_missing[gi] |= s.is_empty();
-                t.push(KeyVal::Str(s));
-            } else {
-                let x = nums[gi * numv.len() + j];
-                j += 1;
-                has_missing[gi] |= x >= miss;
-                t.push(KeyVal::Num(if x == 0.0 { 0.0 } else { x }));
-            }
-        }
-        tuples.push(t);
-    }
-    Ok((KeyInfo { has_missing }, tuples))
-}
-
-fn cmp_tuple(a: &[KeyVal], b: &[KeyVal]) -> Ordering {
-    for (x, y) in a.iter().zip(b) {
-        let o = match (x, y) {
-            (KeyVal::Num(p), KeyVal::Num(q)) => p.partial_cmp(q).unwrap_or(Ordering::Equal),
-            (KeyVal::Str(p), KeyVal::Str(q)) => p.cmp(q),
-            _ => Ordering::Equal,
-        };
-        if o != Ordering::Equal {
-            return o;
-        }
-    }
-    Ordering::Equal
-}
-
-/// Group numbers 1..K in Stata's sort order of the key tuples of the groups with `keep`, `None`
-/// for the others.
-pub fn group_numbers(tuples: &[Vec<KeyVal>], keep: &[bool]) -> Vec<Option<u64>> {
-    let mut idx: Vec<usize> = (0..tuples.len()).filter(|&i| keep[i]).collect();
-    idx.sort_unstable_by(|&a, &b| cmp_tuple(&tuples[a], &tuples[b]));
-    let mut out = vec![None; tuples.len()];
-    for (r, &i) in idx.iter().enumerate() {
-        out[i] = Some(r as u64 + 1);
-    }
-    out
 }

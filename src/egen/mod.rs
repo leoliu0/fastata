@@ -14,7 +14,7 @@ use crate::error::{Error, Res, vec_filled};
 use crate::io::{self, Io, Rows};
 use crate::par::{StoreMode, for_blocks};
 
-use groups::{Groups, Scatter, for_groups, group_numbers, hashed_groups, key_info, one_group, read_touse, sorted_groups};
+use groups::{Groups, Scatter, for_groups, group_column, hashed_groups, one_group, read_touse, sorted_groups, tag_column};
 use spec::{Fcn, Spec};
 
 /// What one compute phase produced.
@@ -48,11 +48,11 @@ pub fn compute<I: Io>(io: &I, s: &Spec) -> Res<Computed> {
         return Err(Error::fallback("no observations"));
     }
     let miss = io.missval();
-    crate::nan::check_vars(io, &s.keys, s.threads)?;
     let touse = read_touse(io, s.touse, s.threads)?;
     let mut nn = None;
     let out = if s.fcn.is_keyed() {
-        keyed(io, s, touse.as_deref())?
+        let (o, _keyint) = keyed(io, s, touse.as_deref())?;
+        o
     } else if s.fcn.is_row() {
         row_fn(io, s, touse.as_deref())?
     } else {
@@ -65,34 +65,16 @@ pub fn compute<I: Io>(io: &I, s: &Spec) -> Res<Computed> {
 }
 
 /// `group()` and `tag()`: groups of the sample by the varlist; without `missing`, groups with a
-/// missing key are left out (`.` for group, 0 for tag).
-fn keyed<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
+/// missing key are left out (`.` for group, 0 for tag). Also returns, for `group()` without
+/// `missing`, whether each key is numeric and integer at every observation numbered (one entry
+/// per key; empty otherwise).
+fn keyed<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Vec<bool>)> {
+    if s.fcn == Fcn::Tag {
+        return Ok((tag_column(io, &s.keys, touse, s.missing, s.threads)?, Vec::new()));
+    }
     let miss = io.missval();
-    let n = io.nobs();
-    let g = hashed_groups(io, &s.keys, s.touse, touse, s.threads)?;
-    let (info, tuples) = key_info(io, &s.keys, &g)?;
-    let keep: Vec<bool> = info.has_missing.iter().map(|&m| s.missing || !m).collect();
-    let tag = s.fcn == Fcn::Tag;
-    let mut out = vec_filled(n, if tag { 0.0 } else { miss })?;
-    let ids = if tag { Vec::new() } else { group_numbers(&tuples, &keep) };
-    let sc = Scatter::new(&mut out);
-    for_groups(io, &g, s.threads, |gi, members, _| {
-        if !keep[gi] {
-            return Ok(());
-        }
-        if tag {
-            // SAFETY: groups are disjoint; each group is handled by one worker.
-            unsafe { sc.set(members[0], 1.0) };
-        } else {
-            let v = s.ty.cast(ids[gi].map_or(miss, |k| k as f64), miss)?;
-            for &o in members {
-                // SAFETY: as above.
-                unsafe { sc.set(o, v) };
-            }
-        }
-        Ok(())
-    })?;
-    Ok(out)
+    let ty = s.ty;
+    group_column(io, &s.keys, touse, s.missing, s.threads, |k| ty.cast(k, miss))
 }
 
 /// Raw values of the expression: the variable, or for `count` with `cntflag` the flag
@@ -138,7 +120,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Op
     } else if s.sorted && s.keys.iter().all(|&k| !io.is_str(k)) {
         sorted_groups(io, &s.keys, touse, s.threads)?
     } else {
-        hashed_groups(io, &s.keys, s.touse, touse, s.threads)?
+        hashed_groups(io, &s.keys, touse, s.threads)?
     };
     let mut out = vec_filled(n, miss)?;
     let quantile = matches!(s.fcn, Fcn::Median | Fcn::Pctile | Fcn::Iqr);
