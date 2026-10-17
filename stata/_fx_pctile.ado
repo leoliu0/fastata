@@ -87,10 +87,10 @@ program Fast
 		c_local fx_why "exp"
 		exit
 	}
-	* state-dependent functions: s() and regexs()/ustrregexs() (the last match of
-	* regexm()/ustrregexm(), which this program's parsing calls)
+	* state-dependent functions: s() and regexs()/ustrregexs()/regexcapture() (the last match of
+	* regexm()/ustrregexm()/regexmatch(), which this program's parsing calls)
 	local txt `"`p_exp' `p_if'"'
-	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs)\s*\(") {
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs|regexcapture|regexcapturenamed)\s*\(") {
 		c_local fx_why "state"
 		exit
 	}

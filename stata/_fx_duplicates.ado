@@ -68,12 +68,13 @@ program _fx_duplicates, rclass
 			}
 			else local vartext "{res} `varlist'"
 		}
-		* state-dependent functions in if: s() and regexs()/ustrregexs() (the last match of
-		* regexm()/ustrregexm()) may differ between here and the original; random-number functions
-		* draw again when the original runs after marksample, so their state is put back first
+		* state-dependent functions in if: s() and regexs()/ustrregexs()/regexcapture() (the last
+		* match of regexm()/ustrregexm()/regexmatch()) may differ between here and the original;
+		* random-number functions draw again when the original runs after marksample, so their
+		* state is put back first
 		local rng
 		if "`fx_why'" == "" & `"`if'"' != "" {
-			if ustrregexm(`"`if'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs)\s*\(") local fx_why state
+			if ustrregexm(`"`if'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs|regexcapture|regexcapturenamed)\s*\(") local fx_why state
 			else if ustrregexm(`"`if'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
 				local rng = c(rngstate)
 			}
