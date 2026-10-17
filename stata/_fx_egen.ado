@@ -9,19 +9,25 @@ program _fx_egen, byable(onecall)
 	version 16
 	local byv
 	if _by() local byv `_byvars'
-	* Small data: below these numbers of observations the original is faster than fastata's
-	* fixed cost per call, so it runs right away (fallback "small data"; off in verify mode and
-	* after _fx small off). Provisional, from perf_profile section 4: by prefix 10000, but 1000
-	* for median(), pctile(), iqr() and rank() (their originals sort within groups); group(),
-	* tag() and by() (hash grouping) 1000; every other form (row functions, no groups) 20000.
+	* Small data: below these numbers of observations the original, run right away, is faster
+	* than fastata's fixed cost per call (fallback "small data"; off in verify mode and after
+	* _fx small off). Measured with bench/small.do (Stata 19.5 MP, 64 cores): with the by
+	* prefix 1000 for median(), pctile(), iqr() and rank() and 20000 otherwise; group(), tag(),
+	* rank(), rowmean() and rowsd() 1000; other functions with the by() option 2000; median(),
+	* pctile() and iqr() without groups 5000; rowtotal(), rowmin(), rowmax(), rowmiss() and
+	* rownonmiss() 50000; every other form 20000.
 	local fx_small 0
-	if c(N) < 20000 {
+	if c(N) < 50000 {
+		local fx_sf
+		if ustrregexm(`"`0'"', "=\s*([A-Za-z0-9_]+)\s*\(") local fx_sf = ustrregexs(1)
 		local fx_k 20000
 		if _by() {
-			local fx_k 10000
-			if ustrregexm(`"`0'"', "=\s*(median|pctile|iqr|rank)\s*\(") local fx_k 1000
+			if inlist("`fx_sf'", "median", "pctile", "iqr", "rank") local fx_k 1000
 		}
-		else if ustrregexm(`"`0'"', "=\s*(group|tag)\s*\(|,.*(^|[\s,])by\s*\(") local fx_k 1000
+		else if inlist("`fx_sf'", "group", "tag", "rank", "rowmean", "rowsd") local fx_k 1000
+		else if ustrregexm(`"`0'"', ",.*(^|[\s,])by\s*\(") local fx_k 2000
+		else if inlist("`fx_sf'", "median", "pctile", "iqr") local fx_k 5000
+		else if inlist("`fx_sf'", "rowtotal", "rowmin", "rowmax", "rowmiss", "rownonmiss") local fx_k 50000
 		if c(N) < `fx_k' _fx small egen
 	}
 	if !`fx_small' {

@@ -27,7 +27,8 @@ sysdir set PLUS `"`here'/_plus/"'
 _fx rmruntime `"`here'/_plus/fastata/"'
 
 * ------------------------------------------------------------------------------------------- data
-* D10: id, g (100k groups), year, x1-x5, w, sn (numeric strings, 1% "NA"), z; D10s sorted by g
+* D10: id, g (100k groups), year, x1-x5, w, sn (numeric strings, 1% "NA"), z, idr; idu (unique,
+* shuffled) and firm (1M values) for many groups; D10s sorted by g
 quietly {
 	set obs `nobs'
 	gen long id = _n
@@ -41,6 +42,9 @@ quietly {
 	gen long z = floor(runiform()*1e8)
 	* unique but not in ascending order: isid takes the hash path
 	gen long idr = _N + 1 - id
+	* a random permutation of 1..N, made without sorting the data (D10 has no sort order)
+	mata: st_store(., st_addvar("long", "idu"), jumble(1::st_nobs()))
+	gen long firm = floor(runiform()*1e6)
 }
 frame rename default D10
 frame copy D10 D10s
@@ -124,6 +128,8 @@ fx_scen E7 D10  egen .  "double" "s"  "egen double s = total(x1)"
 fx_scen E8 D10  egen 5  "double" "rt" "egen double rt = rowtotal(x1-x5)"
 fx_scen E9 D10  egen 5  "double" "m"  "egen double m = mean(x1) if year > 2005, by(g)"
 fx_scen E10 D10 egen 8  "float"  "c"  "egen c = count(x1), by(g year)"
+fx_scen E11 D10 egen 10 "float"  "gg" "egen gg = group(idu)"
+fx_scen E12 D10 egen 10 "float"  "gg" "egen gg = group(firm year)"
 fx_scen K1 D10  isid 20 "" "" "isid id"
 fx_scen K2 D10  duplicates 10 "byte" "dt" "duplicates tag g year, gen(dt)"
 fx_scen K3 D10  duplicates 8 "" "" "duplicates drop g year, force"

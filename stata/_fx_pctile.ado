@@ -8,8 +8,9 @@ program _fx_pctile
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	* small data (below 300 observations): the original right away (see _fx gate)
-	_fx gate pctile `=c(N) < 300'
+	* small data (below 2000 observations, measured with bench/small.do): the original right away
+	* (see _fx gate)
+	_fx gate pctile `=c(N) < 2000'
 	if "`fx_small'" == "1" {
 		capture error `rc0'
 		version `caller': `fx_prog' `0'

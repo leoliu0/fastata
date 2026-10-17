@@ -9,7 +9,9 @@ program _fx_isid
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	_fx gate isid `=c(N) < 150'
+	* small data (below 100 observations, measured with bench/small.do): the original right away
+	* (see _fx gate)
+	_fx gate isid `=c(N) < 100'
 	if "`fx_small'" == "1" {
 		capture error `rc0'
 		version `caller': `fx_prog' `0'

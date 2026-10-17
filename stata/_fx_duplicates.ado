@@ -10,8 +10,11 @@ program _fx_duplicates, rclass
 	local rc0 = c(rc)
 	version 16
 	local cmdline `"`0'"'
-	* small data (below 500 observations): the original right away (see _fx gate)
-	_fx gate duplicates `=c(N) < 500'
+	* small data: the original right away (see _fx gate), below 500 observations for tag and
+	* 200 for the other subcommands (measured with bench/small.do)
+	gettoken fx_k : 0, parse(" ,")
+	local fx_k = cond(`"`fx_k'"' != "" & bsubstr("tag", 1, max(1, ustrlen(`"`fx_k'"'))) == `"`fx_k'"', 500, 200)
+	_fx gate duplicates `=c(N) < `fx_k''
 	if "`fx_small'" == "1" {
 		capture error `rc0'
 		capture noisily version `caller': `fx_prog' `0'

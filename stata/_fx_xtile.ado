@@ -7,13 +7,9 @@ program _fx_xtile
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	* small data (below 200 observations): the original right away (see _fx gate)
-	_fx gate xtile `=c(N) < 200'
-	if "`fx_small'" == "1" {
-		capture error `rc0'
-		version `caller': `fx_prog' `0'
-		exit
-	}
+	* no small-data cutoff: xtile.ado calls pctile, so running the original from here pays two
+	* shims, and the fast path is faster than that at every size (bench/small.do)
+	_fx gate xtile
 	if `fx_ok' {
 		local fx_done 0
 		Fast `0'

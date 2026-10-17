@@ -119,8 +119,8 @@ _fx mode auto
 
 * the small-data cutoff: with it on, a call on few observations runs the original right away
 * (counted as fallback "small data") with the same data, output and r(); with it off (as
-* fx_setup leaves it), the same call takes the fast path. On data above every cutoff the fast
-* path runs with the cutoff on too.
+* fx_setup leaves it), the same call takes the fast path. On data above the call's cutoff the
+* fast path runs with the cutoff on too, and xtile, which has no cutoff, always takes it.
 frame copy base sm
 frame sm: quietly keep in 1/60
 frame copy sm smg
@@ -142,14 +142,14 @@ fs "egen gg = group(s g)" egen sm
 fs "isid id" isid sm
 fs "duplicates report g" duplicates sm allr
 fs "duplicates tag g, gen(dt)" duplicates sm allr
-fs "xtile q = x1, nq(4)" xtile sm
 fs "pctile double p = x1, nq(4)" pctile sm
 fs "destring sn, replace force" destring sm
 fs "tostring zi, gen(zs)" tostring sm
 _fx small on
 fx_both "egen double m = mean(x1), by(g)", base(base) expect(egen fast) tol(1e-13)
+fx_both "xtile q = x1, nq(4)", base(sm) expect(xtile fast)
 _fx small off
-global FB_N = $FB_N + 1
+global FB_N = $FB_N + 2
 frame drop sm smg
 
 * _fx store drops the new (nofill) variables and fails when _fx_call cannot use the plugin (a
