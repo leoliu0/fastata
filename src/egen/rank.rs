@@ -9,9 +9,9 @@
 use std::sync::{Mutex, PoisonError};
 
 use super::spec::{OVERFLOW, is_code};
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
+use crate::error::{Error, Res, vec_filled, vec_with_capacity, vec_zeroed};
 use crate::io::Io;
-use crate::par::{StoreMode, for_blocks, threads_for_rows};
+use crate::par::{Shared, StoreMode, for_blocks, threads_for_rows};
 
 /// Groups of at least this many sample observations are ranked here instead of by a worker of
 /// `for_groups` that sorts the group on its own.
@@ -41,11 +41,6 @@ fn key(v: f64, field: bool) -> u64 {
     let k = if b >> 63 == 1 { !b } else { b | (1 << 63) };
     if field { !k } else { k }
 }
-
-/// A buffer the workers of pass 2 write into at disjoint positions.
-struct Shared(*mut (u64, u32));
-
-unsafe impl Sync for Shared {}
 
 /// Ranks the members with a nonmissing value `x[o]` (ascending, or descending for `field`):
 /// `put(o, lowest rank, ties)` once for each of them, in no particular order. Returns the number
@@ -117,9 +112,8 @@ where
     drop(counts);
 
     // Pass 2: the pairs, in their buckets.
-    let mut pairs = vec_filled(nn, (0u64, 0u32))?;
-    let dst = Shared(pairs.as_mut_ptr());
-    let dst = &dst;
+    let mut pairs: Vec<(u64, u32)> = vec_zeroed(nn)?;
+    let dst = Shared::new(&mut pairs);
     for_blocks(io, nc, t, StoreMode::Parallel, |c, _emit| {
         let mut pos = vec_filled(nb, 0usize)?;
         pos.copy_from_slice(&off[c]);
@@ -131,7 +125,7 @@ where
                 debug_assert!(pos[b] < start[b + 1]);
                 // SAFETY: chunk c owns positions off[c][b] .. off[c][b] + (its count of bucket
                 // b), disjoint from every other chunk's and inside `pairs` (pass 1 counted them).
-                unsafe { *dst.0.add(pos[b]) = (k, o) };
+                unsafe { dst.set(pos[b], (k, o)) };
                 pos[b] += 1;
             }
         }

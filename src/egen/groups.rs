@@ -2,12 +2,10 @@
 //! keys), observations ascending within each group; the parallel driver over groups; and the
 //! `tag()` and `group()` columns (group numbers in Stata's sort order of the keys).
 
-use std::marker::PhantomData;
-
-use crate::error::{Res, vec_with_capacity};
-use crate::group::{KEY_CHUNK, Keyed, Need, ReadOpts, RepKeys, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, sorted_starts, vec_zeroed};
+use crate::error::{Res, vec_with_capacity, vec_zeroed};
+use crate::group::{KEY_CHUNK, Keyed, Need, ReadOpts, RepKeys, par_for, par_map, par_sort_by, read_flags, sample_from_bools, sorted_starts};
 use crate::io::Io;
-use crate::par::{StoreMode, for_blocks, threads_for_rows};
+use crate::par::{Shared, StoreMode, for_blocks, threads_for_rows};
 
 /// Sample observations of each group: group `g` is `ord[starts[g]..starts[g + 1]]`, ascending.
 /// Groups without sample observations do not appear.
@@ -176,33 +174,6 @@ fn group_numbers<I: Io>(io: &I, rk: &RepKeys<'_>, keep: &[u32], ngroups: usize, 
         Ok(())
     })?;
     Ok(numbers)
-}
-
-/// Output column shared by the workers of [`for_groups`]: each observation is written by the one
-/// worker that owns its group.
-pub struct Scatter<'a> {
-    ptr: *mut f64,
-    len: usize,
-    _out: PhantomData<&'a mut [f64]>,
-}
-
-unsafe impl Sync for Scatter<'_> {}
-
-impl<'a> Scatter<'a> {
-    pub fn new(out: &'a mut [f64]) -> Scatter<'a> {
-        Scatter { ptr: out.as_mut_ptr(), len: out.len(), _out: PhantomData }
-    }
-
-    /// Writes observation `i`.
-    ///
-    /// # Safety
-    /// No other thread reads or writes observation `i` while the [`Scatter`] is in use.
-    #[inline]
-    pub unsafe fn set(&self, i: u32, v: f64) {
-        let i = i as usize;
-        assert!(i < self.len);
-        unsafe { *self.ptr.add(i) = v };
-    }
 }
 
 /// Observations per work item of [`for_groups`] (at least one whole group per item).

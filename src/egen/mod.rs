@@ -11,15 +11,14 @@ pub mod spec;
 
 use std::cmp::Ordering as CmpOrdering;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use crate::args::Args;
 use crate::cache::{self, Output, read_cols};
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
+use crate::error::{Error, Res, vec_filled};
 use crate::io::{self, Io, Rows};
-use crate::par::{StoreMode, for_blocks};
+use crate::par::{Shared, for_chunks};
 
-use groups::{Groups, Scatter, for_groups, group_column, hashed_groups, one_group, read_touse, sorted_groups, tag_column};
+use groups::{Groups, for_groups, group_column, hashed_groups, one_group, read_touse, sorted_groups, tag_column};
 use spec::{Fcn, RankMode, Spec, Ty, miss_count};
 
 /// What one compute phase produced.
@@ -157,7 +156,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, us
     let big_rank = |members: &[u32]| s.fcn == Fcn::Rank && members.len() >= rank::BIG;
     // Missing results among the sample observations (the others are `.`).
     let nm = AtomicUsize::new(0);
-    let sc = Scatter::new(&mut out);
+    let sc = Shared::new(&mut out);
     for_groups(io, &g, s.threads, |_gi, members, scratch| {
         if big_rank(members) {
             return Ok(());
@@ -173,7 +172,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, us
             }
             for &o in members {
                 // SAFETY: groups are disjoint; each group is handled by one worker.
-                unsafe { sc.set(o, v) };
+                unsafe { sc.set(o as usize, v) };
             }
             Ok(())
         };
@@ -190,7 +189,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, us
                     let v = ty.cast(reduce::std_value(scratch[j], mu, sd, s.sd, s.mean, miss)?, miss)?;
                     k += miss_count(v, miss)?;
                     // SAFETY: as above.
-                    unsafe { sc.set(o, v) };
+                    unsafe { sc.set(o as usize, v) };
                 }
                 nm.fetch_add(k, Ordering::Relaxed);
                 Ok(())
@@ -229,7 +228,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, us
                         miss
                     };
                     // SAFETY: as above.
-                    unsafe { sc.set(o, r) };
+                    unsafe { sc.set(o as usize, r) };
                 }
                 nm.fetch_add(k, Ordering::Relaxed);
                 Ok(())
@@ -245,7 +244,7 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, us
                 nmiss += rank::rank_big(io, &x, members, field, miss, s.threads, |o, lo, ties| {
                     let v = rank_value(lo, ties, s.rank, ty, miss)?;
                     // SAFETY: each observation of the group gets one call; no other writer.
-                    unsafe { sc.set(o, v) };
+                    unsafe { sc.set(o as usize, v) };
                     Ok(())
                 })?;
             }
@@ -284,10 +283,8 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, usi
     let numv: Vec<i32> = s.vals.iter().zip(&strs).filter(|(_, s)| !**s).map(|(v, _)| *v).collect();
     let nn = numv.len();
     let mut out = vec_filled(n, miss)?;
-    let mut slots: Vec<Mutex<&mut [f64]>> = vec_with_capacity(n.div_ceil(ROW_BLOCK))?;
-    slots.extend(out.chunks_mut(ROW_BLOCK).map(Mutex::new));
-    let counts = for_blocks(io, slots.len(), s.threads, StoreMode::Parallel, |b, _emit| {
-        let mut res = slots[b].lock().unwrap_or_else(PoisonError::into_inner);
+    let counts = for_chunks(io, &mut [&mut out[..]], ROW_BLOCK, s.threads, |b, ch| {
+        let res = &mut *ch[0];
         let first = b * ROW_BLOCK;
         let m = res.len();
         let mut raw = vec_filled(m * nn, 0.0)?;
@@ -319,7 +316,6 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, usi
         }
         Ok(nmiss)
     })?;
-    drop(slots);
     Ok((out, counts.into_iter().sum()))
 }
 

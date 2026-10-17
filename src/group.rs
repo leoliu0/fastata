@@ -24,11 +24,10 @@
 //! group's lowest.
 
 use std::cmp::Ordering;
-use std::marker::PhantomData;
 
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
+use crate::error::{Error, Res, Zeroable, vec_filled, vec_with_capacity, vec_zeroed};
 use crate::io::{Io, Rows};
-use crate::par::{StoreMode, for_blocks, threads_for_rows};
+use crate::par::{Shared, StoreMode, for_blocks, threads_for_rows};
 
 /// Positions per work item when scanning keys, samples and groups.
 pub const KEY_CHUNK: usize = 65_536;
@@ -44,74 +43,6 @@ const BLOCK_VALUES: usize = 1 << 17;
 
 /// Room for one str# value (str2045 plus its terminator), reserved before each string read.
 const STR_ROOM: usize = 2046;
-
-/// A mutable slice shared by the workers of one parallel region, each touching only its own
-/// indices.
-pub struct Shared<'a, T> {
-    ptr: *mut T,
-    len: usize,
-    _borrow: PhantomData<&'a mut [T]>,
-}
-
-unsafe impl<T: Send> Sync for Shared<'_, T> {}
-
-impl<'a, T: Copy> Shared<'a, T> {
-    pub fn new(s: &'a mut [T]) -> Self {
-        Shared { ptr: s.as_mut_ptr(), len: s.len(), _borrow: PhantomData }
-    }
-
-    /// # Safety
-    /// No other thread accesses index `i` while the region runs.
-    #[inline]
-    pub unsafe fn set(&self, i: usize, v: T) {
-        assert!(i < self.len);
-        unsafe { *self.ptr.add(i) = v };
-    }
-
-    /// # Safety
-    /// No other thread writes index `i` while the region runs.
-    #[inline]
-    pub unsafe fn get(&self, i: usize) -> T {
-        assert!(i < self.len);
-        unsafe { *self.ptr.add(i) }
-    }
-
-    /// # Safety
-    /// No other thread accesses `lo..hi` while the returned slice lives.
-    #[inline]
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn slice(&self, lo: usize, hi: usize) -> &mut [T] {
-        assert!(lo <= hi && hi <= self.len);
-        unsafe { std::slice::from_raw_parts_mut(self.ptr.add(lo), hi - lo) }
-    }
-}
-
-/// Element types whose all-zero bit pattern is a value (0, 0.0, false).
-pub trait Zero: Copy {}
-
-impl Zero for u32 {}
-impl Zero for u64 {}
-impl Zero for usize {}
-impl Zero for f64 {}
-impl Zero for bool {}
-impl<A: Zero, B: Zero> Zero for (A, B) {}
-
-/// `len` zeros, or r(909). Unlike `vec_filled`, nothing is written here: large blocks come from
-/// the system as untouched zero pages, first touched (in parallel) by the workers that fill them.
-pub fn vec_zeroed<T: Zero>(len: usize) -> Res<Vec<T>> {
-    let layout = std::alloc::Layout::array::<T>(len).map_err(|_| Error::oom())?;
-    if layout.size() == 0 {
-        return Ok(Vec::new());
-    }
-    // SAFETY: the layout has a nonzero size.
-    let p = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<T>();
-    if p.is_null() {
-        return Err(Error::oom());
-    }
-    // SAFETY: allocated by the global allocator with the layout of `len` T's, all of them zero
-    // bits, a valid T.
-    Ok(unsafe { Vec::from_raw_parts(p, len, len) })
-}
 
 /// Item `c` of `len` positions cut into [`KEY_CHUNK`]s.
 fn chunk(c: usize, len: usize) -> std::ops::Range<usize> {
@@ -134,7 +65,7 @@ where
 pub fn par_map<I, T, F>(io: &I, len: usize, threads: usize, f: F) -> Res<Vec<T>>
 where
     I: Io,
-    T: Zero + Send,
+    T: Zeroable + Send,
     F: Fn(usize) -> Res<T> + Sync,
 {
     let mut out = vec_zeroed(len)?;

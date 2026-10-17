@@ -10,6 +10,7 @@
 //! When the OS refuses a thread, the region runs on the threads it has, the calling thread
 //! included, rather than failing.
 
+use std::marker::PhantomData;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError, mpsc};
@@ -67,6 +68,47 @@ pub const MIN_ROWS_PER_THREAD: usize = 1 << 16;
 /// least 1. Work items stay fixed, so results do not depend on it.
 pub fn threads_for_rows(threads: usize, rows: usize) -> usize {
     resolve_threads(threads, rows.div_ceil(MIN_ROWS_PER_THREAD))
+}
+
+/// A mutable slice shared by the workers of one parallel region, each touching only its own
+/// indices.
+pub struct Shared<'a, T> {
+    ptr: *mut T,
+    len: usize,
+    _borrow: PhantomData<&'a mut [T]>,
+}
+
+unsafe impl<T: Send> Sync for Shared<'_, T> {}
+
+impl<'a, T: Copy> Shared<'a, T> {
+    pub fn new(s: &'a mut [T]) -> Self {
+        Shared { ptr: s.as_mut_ptr(), len: s.len(), _borrow: PhantomData }
+    }
+
+    /// # Safety
+    /// No other thread accesses index `i` while the region runs.
+    #[inline]
+    pub unsafe fn set(&self, i: usize, v: T) {
+        assert!(i < self.len);
+        unsafe { *self.ptr.add(i) = v };
+    }
+
+    /// # Safety
+    /// No other thread writes index `i` while the region runs.
+    #[inline]
+    pub unsafe fn get(&self, i: usize) -> T {
+        assert!(i < self.len);
+        unsafe { *self.ptr.add(i) }
+    }
+
+    /// # Safety
+    /// No other thread accesses `lo..hi` while the returned slice lives.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn slice(&self, lo: usize, hi: usize) -> &mut [T] {
+        assert!(lo <= hi && hi <= self.len);
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.add(lo), hi - lo) }
+    }
 }
 
 fn write_job<I: Io + ?Sized>(io: &I, job: &WriteJob) -> Res<()> {

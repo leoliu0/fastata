@@ -36,9 +36,10 @@ use std::collections::BTreeMap;
 
 use crate::args::Args;
 use crate::cache::{self, Output};
-use crate::error::{Error, Res, vec_filled, vec_with_capacity};
-use crate::group::{Keyed, Need, ReadOpts, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, vec_zeroed};
+use crate::error::{Error, Res, vec_filled, vec_with_capacity, vec_zeroed};
+use crate::group::{Keyed, Need, ReadOpts, par_for, par_map, par_sort_by, read_flags, sample_from_bools};
 use crate::io::{self, Io};
+use crate::par::Shared;
 
 /// What `isid` reports: (observations with a missing key, distinct tuples when computed).
 fn isid_counts<I: Io>(io: &I, missok: bool, threads: usize) -> Res<(usize, Option<usize>)> {

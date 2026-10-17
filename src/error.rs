@@ -78,6 +78,8 @@ unsafe impl Zeroable for u32 {}
 unsafe impl Zeroable for u64 {}
 unsafe impl Zeroable for usize {}
 unsafe impl Zeroable for bool {}
+// SAFETY: a tuple of zeroable fields is all zero bytes (padding included) when its fields are.
+unsafe impl<A: Zeroable, B: Zeroable> Zeroable for (A, B) {}
 
 /// `len` zeros, or r(909). Unlike [`vec_filled`] nothing is written here: the allocator hands
 /// out zeroed memory (fresh pages for large sizes), so a column is first touched by the worker
