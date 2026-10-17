@@ -10,7 +10,9 @@
 *!
 *! For the _fx_<cmd> programs (the first five are the per-call ones: each ends in exit, so that
 *! Stata does not read through the rest of this program, which costs about 20 µs a call):
-*!   gate <key>                        fx_ok: 1 if every original file of key is verified; fx_why;
+*!   gate <key> [1]                    with 1 (a call with few observations), first as small
+*!                                     below; otherwise, or when that does not apply:
+*!                                     fx_ok: 1 if every original file of key is verified; fx_why;
 *!                                     fx_vpend: 1 in verify mode when fx_ok is 1 (gate has then
 *!                                     copied the current frame to a frame of a name no other
 *!                                     frame has; verify, a fallback, a failed store or Break in
@@ -26,10 +28,10 @@
 *!                                     return code (9999 if it gave none)
 *!   fallback <cmd> "<reason>"         counts a fallback of cmd and sets fx_prog (count + orig)
 *!   small <cmd>                       the small-data cutoff, for a call with few observations:
-*!                                     fx_small 1 when the caller is to run the original right
-*!                                     away (the call is then counted as fallback "small data",
-*!                                     and fx_prog, fx_ok 0 and fx_why are set); fx_small 0 in
-*!                                     verify mode and after small off
+*!                                     fx_small 1 and fx_prog when the caller is to run the
+*!                                     original right away (the call is then counted as fallback
+*!                                     "small data"); fx_small unset in verify mode and after
+*!                                     small off
 *!   vabort                            drops a pending verify snapshot (the fast path stops with
 *!                                     an error; _fx_call on Break)
 *!   orig <cmd>                        fx_prog: the program that runs cmd's original ado-file
@@ -87,9 +89,17 @@ program _fx
 	version 16
 	args sub
 	if "`sub'" == "gate" {
-		args sub key
+		args sub key small
 		local envm : env FASTATA_MODE
-		quietly mata: _fx_gate_check(st_local("key"), st_local("envm"))
+		quietly mata: _fx_gate_check(st_local("key"), st_local("envm"), "`small'" == "1")
+		if "`fx_small'" == "1" {
+			local f : env FASTATA_COUNTS
+			if `"`f'"' != "" & !`fx_skip' CountFile `"`f'"' `"`fx_cmd',fallback,`fx_why'"'
+			if `"`fx_err'"' != "" | "`fx_prog'" == "" _fx orig `fx_cmd'
+			c_local fx_prog `fx_prog'
+			c_local fx_small 1
+			exit
+		}
 		c_local fx_ok `fx_ok'
 		c_local fx_why `"`fx_why'"'
 		if "`fx_vmode'" == "1" VSnap
@@ -116,10 +126,8 @@ program _fx
 			if `"`f'"' != "" & !`fx_skip' CountFile `"`f'"' `"`cmd',fallback,`fx_why'"'
 			if `"`fx_err'"' != "" | "`fx_prog'" == "" _fx orig `cmd'
 			c_local fx_prog `fx_prog'
-			c_local fx_ok 0
-			c_local fx_why `"`fx_why'"'
+			c_local fx_small 1
 		}
-		c_local fx_small `fx_small'
 		exit
 	}
 	if "`sub'" == "fallback" {
@@ -778,8 +786,10 @@ string rowvector _fx_verdict(string scalar key)
 }
 
 // Sets locals fx_ok and fx_why, and fx_vmode (1 when the fast path is to be verified). Verdicts
-// are cached per key and state. envm: the value of env FASTATA_MODE.
-void _fx_gate_check(string scalar key, string scalar envm)
+// are cached per key and state. envm: the value of env FASTATA_MODE. small: 1 for a call with
+// few observations, which first goes through the small-data cutoff (_fx_smallrun; fx_small 1 and
+// nothing else set when it applies).
+void _fx_gate_check(string scalar key, string scalar envm, | real scalar small)
 {
 	pointer(transmorphic scalar) scalar pv
 	string scalar ck, mode
@@ -787,6 +797,11 @@ void _fx_gate_check(string scalar key, string scalar envm)
 
 	st_local("fx_vmode", "0")
 	mode = _fx_getmode(envm)
+	if (args() == 3) {
+		if (small) {
+			if (_fx_smallrun(strpos(key, ":") ? substr(key, 1, strpos(key, ":") - 1) : key, mode)) return
+		}
+	}
 	if (mode == "original") {
 		st_local("fx_ok", "0")
 		st_local("fx_why", "mode original")
@@ -848,27 +863,34 @@ void _fx_setsmall(string scalar v)
 	*p = v
 }
 
-// For a call of cmd that its _fx_<cmd> found to have few observations: sets local fx_small to 1
-// after counting the call as a fallback (fx_why: "small data", or "mode original" in that mode)
-// and looking up the original (locals fx_prog and fx_err of _fx_orig_prog), so that the caller
-// runs the original right away; to 0 in verify mode (every fast path is to be verified) or when
-// the cutoff is off. envm: the value of env FASTATA_MODE.
-void _fx_small(string scalar cmd, string scalar envm)
+// For a call of cmd with few observations (its _fx_<cmd> decides): unless in verify mode (every
+// fast path is to be verified) or with the cutoff off, counts the call as a fallback (fx_why:
+// "small data", or "mode original" in that mode), looks up the original (locals fx_prog and
+// fx_err of _fx_orig_prog), sets locals fx_small 1 and fx_cmd, and returns 1, so that the caller
+// runs the original right away; else sets fx_small 0 and returns 0.
+real scalar _fx_smallrun(string scalar cmd, string scalar mode)
 {
 	pointer() scalar p
-	string scalar mode, why
+	string scalar why
 
 	st_local("fx_small", "0")
-	mode = _fx_getmode(envm)
-	if (mode == "verify") return
+	if (mode == "verify") return(0)
 	if ((p = findexternal("_fx_small_v")) != NULL) {
-		if (*p == "off") return
+		if (*p == "off") return(0)
 	}
 	why = (mode == "original" ? "mode original" : "small data")
 	st_local("fx_why", why)
+	st_local("fx_cmd", cmd)
 	_fx_count(cmd, "fallback", why)
 	_fx_orig_prog(cmd)
 	st_local("fx_small", "1")
+	return(1)
+}
+
+// _fx small <cmd>: _fx_smallrun for cmd. envm: the value of env FASTATA_MODE.
+void _fx_small(string scalar cmd, string scalar envm)
+{
+	(void) _fx_smallrun(cmd, _fx_getmode(envm))
 }
 
 // A fallback of cmd: counts it and looks up the original (locals fx_prog and fx_err).

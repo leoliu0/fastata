@@ -9,10 +9,13 @@ program _fx_destring
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	* small data: below 300 observations the original runs right away (see _fx_egen)
-	local fx_small 0
-	if c(N) < 300 _fx small destring
-	if !`fx_small' _fx gate destring
+	* small data (below 300 observations): the original right away (see _fx gate)
+	_fx gate destring `=c(N) < 300'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	if `fx_ok' {
 		local fx_why
 		if `caller' < 11 local fx_why caller
@@ -192,7 +195,7 @@ program _fx_destring
 			exit
 		}
 	}
-	if !`fx_small' _fx fallback destring `"`fx_why'"'
+	_fx fallback destring `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end

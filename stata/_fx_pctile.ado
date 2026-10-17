@@ -8,10 +8,13 @@ program _fx_pctile
 	local caller : display _caller()
 	local rc0 = c(rc)
 	version 16
-	* small data: below 300 observations the original runs right away (see _fx_egen)
-	local fx_small 0
-	if c(N) < 300 _fx small pctile
-	if !`fx_small' _fx gate pctile
+	* small data (below 300 observations): the original right away (see _fx gate)
+	_fx gate pctile `=c(N) < 300'
+	if "`fx_small'" == "1" {
+		capture error `rc0'
+		version `caller': `fx_prog' `0'
+		exit
+	}
 	if `fx_ok' {
 		local fx_done 0
 		Fast `0'
@@ -27,7 +30,7 @@ program _fx_pctile
 			exit
 		}
 	}
-	if !`fx_small' _fx fallback pctile `"`fx_why'"'
+	_fx fallback pctile `"`fx_why'"'
 	capture error `rc0'
 	version `caller': `fx_prog' `0'
 end
