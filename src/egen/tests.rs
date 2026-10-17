@@ -362,7 +362,7 @@ fn std_and_extremes_with_missing_option() {
     let got = run2(&d, &sp).unwrap();
     for members in naive_groups(Some(&d.gv), None).values() {
         let xs: Vec<f64> = members.iter().map(|&o| d.xv[o]).collect();
-        let (m, s) = reduce::mean_sd(&xs, MISS, true);
+        let (m, s) = reduce::mean_sd(&xs, MISS, true).unwrap();
         for &o in members {
             let x = d.xv[o];
             let want = if x >= MISS || s >= MISS { MISS } else { spec::arith(2.0 * ((x - m) / s) + 1.5, MISS) };
@@ -427,4 +427,137 @@ fn signed_zeros() {
     assert!(neg(by[0]) && neg(by[3]));
     let mis = compute(&io, &Spec { missing: true, ..spec(Fcn::Min, Ty::Double, vec![], vec![x], None) }).unwrap().out;
     assert!(neg(mis[0]));
+}
+
+/// Lowest rank and ties of each value among the nonmissing ones: runs of equal values in a
+/// sorted index.
+fn naive_ranks(xs: &[f64], mode: RankMode, ty: Ty) -> Vec<f64> {
+    let mut idx: Vec<usize> = (0..xs.len()).filter(|&i| xs[i] < MISS).collect();
+    idx.sort_by(|&a, &b| {
+        let o = xs[a].partial_cmp(&xs[b]).unwrap();
+        if mode == RankMode::Field { o.reverse() } else { o }
+    });
+    let mut out = vec![MISS; xs.len()];
+    let mut i = 0;
+    while i < idx.len() {
+        let mut j = i + 1;
+        while j < idx.len() && xs[idx[j]] == xs[idx[i]] {
+            j += 1;
+        }
+        let lo = ty.cast((i + 1) as f64, MISS).unwrap();
+        let r = if mode == RankMode::Default { ty.cast(lo + ((j - i) as f64 - 1.0) / 2.0, MISS).unwrap() } else { lo };
+        for &k in &idx[i..j] {
+            out[k] = r;
+        }
+        i = j;
+    }
+    out
+}
+
+/// rank() of groups of at least `rank::BIG` observations (the parallel sample sort): without
+/// by-groups, and a large by-group next to small ones; ties, -0/+0, missing codes, a sample.
+#[test]
+fn large_group_ranks_match_counting_reference() {
+    let n = rank::BIG + 70_001;
+    let mut rng = Rng::new(5);
+    let xv: Vec<f64> = (0..n)
+        .map(|i| {
+            let u = rng.unif();
+            if u < 0.03 {
+                MISS
+            } else if u < 0.04 {
+                miss_a()
+            } else if u < 0.06 {
+                if i % 2 == 0 { -0.0 } else { 0.0 }
+            } else if u < 0.5 {
+                ((rng.next_u64() % 2000) as f64) - 1000.0
+            } else {
+                (rng.unif() - 0.5) * 1e6
+            }
+        })
+        .collect();
+    // key: group 1 holds 3 of every 4 observations; the others form small groups
+    let gv: Vec<f64> = (0..n).map(|i| if i % 4 != 0 { 1.0 } else { 2.0 + (i % 400) as f64 }).collect();
+    let tv: Vec<bool> = (0..n).map(|i| i % 11 != 0).collect();
+    let mut io = MemIo::new(n);
+    let (cx, cg) = (io.add_num(&xv), io.add_num(&gv));
+    let ct = io.add_num(&tv.iter().map(|&b| f64::from(u8::from(b))).collect::<Vec<_>>());
+    let (g, x, t) = (io.push_var(cg), io.push_var(cx), io.push_var(ct));
+    for mode in [RankMode::Default, RankMode::Field, RankMode::Track] {
+        for (keys, touse) in [(vec![], None), (vec![], Some(t)), (vec![g], Some(t))] {
+            let mut want = vec![MISS; n];
+            let mut grp: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+            for i in (0..n).filter(|&i| touse.is_none() || tv[i]) {
+                grp.entry(if keys.is_empty() { 0 } else { gv[i].to_bits() }).or_default().push(i);
+            }
+            for members in grp.values() {
+                let xs: Vec<f64> = members.iter().map(|&o| xv[o]).collect();
+                for (&o, r) in members.iter().zip(naive_ranks(&xs, mode, Ty::Double)) {
+                    want[o] = r;
+                }
+            }
+            let sp = Spec { rank: mode, threads: 1, ..spec(Fcn::Rank, Ty::Double, keys.clone(), vec![x], touse) };
+            let a = compute(&io, &sp).unwrap();
+            let b = compute(&io, &Spec { threads: 7, ..sp.clone() }).unwrap();
+            assert_bits(&a.out, &want, &format!("rank {mode:?} keys {keys:?} touse {touse:?}"));
+            assert_bits(&b.out, &want, &format!("rank {mode:?} keys {keys:?} touse {touse:?}, 7 threads"));
+            assert_eq!(a.nmiss, want.iter().filter(|&&v| v >= MISS).count());
+            assert_eq!(b.nmiss, a.nmiss);
+        }
+    }
+    // a byte rank does not fit
+    let r = compute(&io, &spec(Fcn::Rank, Ty::Byte, vec![], vec![x], None));
+    assert!(r.err().is_some_and(|e| e.msg == "type fit"));
+}
+
+/// rust_kernels F1 through the compute phase: by-group sums past `.`, row sums past -`.`, a raw
+/// value beyond `.` in a result, and field ranks of values the original's `-(exp)` moves across
+/// `.` fall back [overflow]; values in range do not.
+#[test]
+fn results_beyond_dot_fall_back() {
+    let raw = f64::from_bits(MISS.to_bits() + 1);
+    let gv = vec![1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0];
+    let xv = vec![8e307, 8e307, -8e307, -8e307, -8e307, 1e160, -1e160, 0.0];
+    let yv = vec![1.0, raw, 2.0, -1e308, MISS, 3.0, miss_a(), 1.0];
+    let mut io = MemIo::new(gv.len());
+    let (cg, cx, cy) = (io.add_num(&gv), io.add_num(&xv), io.add_num(&yv));
+    let (g, x, y) = (io.push_var(cg), io.push_var(cx), io.push_var(cy));
+    let over = |sp: Spec| compute(&io, &sp).err().is_some_and(|e| e.is_fallback() && e.msg == spec::OVERFLOW);
+    for fcn in [Fcn::Total, Fcn::Mean, Fcn::Sd, Fcn::Std, Fcn::Median] {
+        for sorted in [false, true] {
+            assert!(over(Spec { sorted, ..spec(fcn, Ty::Double, vec![g], vec![x], None) }), "{fcn:?}");
+        }
+    }
+    assert!(over(spec(Fcn::RowTotal, Ty::Double, vec![], vec![x, x], None)));
+    assert!(over(spec(Fcn::RowMean, Ty::Double, vec![], vec![x, x, y], None)));
+    assert!(over(spec(Fcn::RowMax, Ty::Double, vec![], vec![y, y], None)));
+    assert!(over(Spec { rank: RankMode::Field, ..spec(Fcn::Rank, Ty::Double, vec![], vec![y], None) }));
+    // max with missing keeps the raw value of group 1 (1, raw): Stata's message would not count it
+    assert!(over(Spec { missing: true, ..spec(Fcn::Max, Ty::Double, vec![g], vec![y], None) }));
+    // in range
+    let c = compute(&io, &spec(Fcn::Rank, Ty::Double, vec![g], vec![y], None)).unwrap();
+    assert_eq!(c.out[3], 1.0);
+    assert_eq!(c.nmiss, 3);
+    let c = compute(&io, &spec(Fcn::Max, Ty::Double, vec![g], vec![y], None)).unwrap();
+    assert_eq!((c.out[0], c.out[2], c.nmiss), (1.0, 2.0, 0));
+    compute(&io, &spec(Fcn::RowMin, Ty::Double, vec![], vec![x, y], None)).unwrap();
+}
+
+#[test]
+fn keyint_of_group_keys() {
+    let a = vec![1.0, 2.0, MISS, 2.0];
+    let b = vec![0.5, 1.0, 7.5, 1.0];
+    let mut io = MemIo::new(a.len());
+    let (ca, cb) = (io.add_num(&a), io.add_num(&b));
+    let cs = io.add_str(vec![b"x".to_vec(); 4]);
+    let (pa, pb, ps) = (io.push_var(ca), io.push_var(cb), io.push_var(cs));
+    let c = compute(&io, &spec(Fcn::Group, Ty::Double, vec![pa, pb, ps], vec![], None)).unwrap();
+    assert_eq!(c.keyint, vec![true, false, false]);
+    // observation 3 (a missing) is left out: b is integer in the others
+    let t = io.add_num(&[0.0, 1.0, 1.0, 1.0]);
+    let pt = io.push_var(t);
+    let c = compute(&io, &spec(Fcn::Group, Ty::Double, vec![pa, pb], vec![], Some(pt))).unwrap();
+    assert_eq!(c.keyint, vec![true, true]);
+    let c = compute(&io, &Spec { missing: true, ..spec(Fcn::Group, Ty::Double, vec![pa, pb], vec![], None) }).unwrap();
+    assert!(c.keyint.is_empty());
 }

@@ -137,6 +137,25 @@ static void egen_median_by(void) {
     egen_case("egen median(x2), by(g) with touse", vars, args);
 }
 
+/* rank(x1), field, no by-groups, double: 1 + the number of larger nonmissing values; missing
+   values get . */
+static void egen_rank_field(void) {
+    static double vals[NOBS];
+    int n = 0;
+    for (int i = 0; i < NOBS; i++) if (num[V_X1][i] < MISSVAL) vals[n++] = num[V_X1][i];
+    qsort(vals, n, sizeof(double), cmp_dbl);
+    for (int i = 0; i < NOBS; i++) {
+        double x = num[V_X1][i];
+        if (x >= MISSVAL) { want[i] = MISSVAL; continue; }
+        int lo = 0, hi = n;
+        while (lo < hi) { int mid = (lo + hi) / 2; if (vals[mid] <= x) lo = mid + 1; else hi = mid; }
+        want[i] = (double)(n - lo) + 1;
+    }
+    int vars[] = {V_X1, -1};
+    const char *args[] = {"egen", "phase=compute", "fcn=rank", "type=double", "nvals=1", "rank=field", NULL};
+    egen_case("egen rank(x1), field", vars, args);
+}
+
 /* A result that does not fit the type falls back; nothing is cached. */
 static void egen_type_fit(void) {
     int vars[] = {V_G, V_X1, -1};
@@ -159,5 +178,6 @@ static void tests_egen(void) {
     egen_tag();
     egen_rowtotal();
     egen_median_by();
+    egen_rank_field();
     egen_type_fit();
 }

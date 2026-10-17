@@ -1,9 +1,10 @@
 //! Row functions, one observation at a time, exactly as the `_grow<fcn>.ado` statements run:
 //! a `gen <type>` followed by one `replace` per further variable, each storing (so rounding to
 //! the storage type, [`Ty::cast`]) its result. Values are raw; for string variables (rowmiss,
-//! rownonmiss) only missingness matters, so the caller passes `.` for "" and 0 otherwise.
+//! rownonmiss) only missingness matters, so the caller passes `.` for "" and 0 otherwise. Sums,
+//! differences and squares are [`checked`]: beyond `.` Stata keeps them raw [overflow].
 
-use super::spec::{Fcn, Ty, arith};
+use super::spec::{Fcn, Ty, arith, checked};
 use crate::error::Res;
 
 #[inline]
@@ -11,10 +12,10 @@ fn zero_if_miss(v: f64, miss: f64) -> f64 {
     if v >= miss { 0.0 } else { v }
 }
 
-/// Stata's `a + b`: missing if either is missing.
+/// Stata's `a + b`: missing if either is missing; the sum checked.
 #[inline]
-fn add(a: f64, b: f64, miss: f64) -> f64 {
-    if a >= miss || b >= miss { miss } else { arith(a + b, miss) }
+fn add(a: f64, b: f64, miss: f64) -> Res<f64> {
+    if a >= miss || b >= miss { Ok(miss) } else { checked(a + b, miss) }
 }
 
 /// The function's value for one sample observation with values `v` (varlist order).
@@ -26,7 +27,7 @@ pub fn row(fcn: Fcn, v: &[f64], ty: Ty, missing: bool, miss: f64) -> Res<f64> {
             // gen g = cond(v1>=.,0,v1); replace g = g + cond(vk>=.,0,vk)
             let mut g = c(zero_if_miss(v[0], miss))?;
             for &x in &v[1..] {
-                g = c(add(g, zero_if_miss(x, miss), miss))?;
+                g = c(add(g, zero_if_miss(x, miss), miss)?)?;
             }
             Ok(g)
         }
@@ -40,7 +41,7 @@ pub fn row(fcn: Fcn, v: &[f64], ty: Ty, missing: bool, miss: f64) -> Res<f64> {
                 } else if x >= miss {
                     g
                 } else {
-                    add(g, x, miss)
+                    add(g, x, miss)?
                 };
                 g = c(y)?;
             }
@@ -51,10 +52,10 @@ pub fn row(fcn: Fcn, v: &[f64], ty: Ty, missing: bool, miss: f64) -> Res<f64> {
             let mut g = 0.0;
             let mut n = 0u64;
             for &x in v {
-                g = add(g, zero_if_miss(x, miss), miss);
+                g = add(g, zero_if_miss(x, miss), miss)?;
                 n += u64::from(x < miss);
             }
-            c(if g >= miss { miss } else { arith(g / n as f64, miss) })
+            c(arith(g / n as f64, miss))
         }
         Fcn::RowMax => {
             // gen g = v1; replace g = cond(g>=. | (vk>g & vk<.), vk, g)
@@ -78,35 +79,29 @@ pub fn row(fcn: Fcn, v: &[f64], ty: Ty, missing: bool, miss: f64) -> Res<f64> {
             let mut mu = 0.0;
             let mut n = 0u64;
             for &x in v {
-                mu = add(mu, zero_if_miss(x, miss), miss);
+                mu = add(mu, zero_if_miss(x, miss), miss)?;
                 n += u64::from(x < miss);
             }
-            let mu = if mu >= miss { miss } else { arith(mu / n as f64, miss) };
+            // n = 0: MU is `.` (0/0), and every cond() below is 0
+            let mu = arith(mu / n as f64, miss);
             let mut g = 0.0;
             for &x in v {
-                let d = if x >= miss {
-                    0.0
-                } else if mu >= miss {
-                    miss
-                } else {
-                    arith(x - mu, miss)
-                };
-                let sq = if d >= miss { miss } else { arith(d * d, miss) };
-                g = add(g, sq, miss);
+                let d = if x >= miss { 0.0 } else { checked(x - mu, miss)? };
+                g = add(g, checked(d * d, miss)?, miss)?;
             }
-            c(if n == 0 || g >= miss { miss } else { arith((g / (n - 1) as f64).sqrt(), miss) })
+            c(if n == 0 { miss } else { arith((g / (n - 1) as f64).sqrt(), miss) })
         }
         Fcn::RowMiss => {
             let mut g = c(flag(v[0] >= miss))?;
             for &x in &v[1..] {
-                g = c(add(g, flag(x >= miss), miss))?;
+                g = c(add(g, flag(x >= miss), miss)?)?;
             }
             Ok(g)
         }
         Fcn::RowNonmiss => {
             let mut g = c(flag(v[0] < miss))?;
             for &x in &v[1..] {
-                g = c(add(g, flag(x < miss), miss))?;
+                g = c(add(g, flag(x < miss), miss)?)?;
             }
             Ok(g)
         }
@@ -154,5 +149,20 @@ mod tests {
         assert_eq!(r(Fcn::RowMiss, &[1.0, MISS, miss_a()], Ty::Byte, false), 2.0);
         assert_eq!(r(Fcn::RowNonmiss, &[1.0, MISS, miss_a()], Ty::Byte, false), 1.0);
         assert!(row(Fcn::RowTotal, &[200.0], Ty::Byte, false, MISS).unwrap_err().is_fallback());
+    }
+
+    /// rust_kernels F1: rowtotal(x x) and rowmean(x x y) with x = -8e307 are ordinary numbers
+    /// beyond -`.` in Stata (kept raw); the fast path falls back instead of giving `.`.
+    #[test]
+    fn sums_beyond_dot_fall_back() {
+        let over = |f: Fcn, v: &[f64], m: bool| row(f, v, Ty::Double, m, MISS).unwrap_err().msg == super::super::spec::OVERFLOW;
+        assert!(over(Fcn::RowTotal, &[-8e307, -8e307], false));
+        assert!(over(Fcn::RowTotal, &[-8e307, -8e307], true));
+        assert!(over(Fcn::RowTotal, &[8e307, 8e307, 1.0], false));
+        assert!(over(Fcn::RowMean, &[-8e307, -8e307, 1.0], false));
+        assert!(over(Fcn::RowSd, &[-8e307, -8e307], false));
+        assert!(over(Fcn::RowSd, &[1e160, -1e160], false));
+        assert_eq!(r(Fcn::RowTotal, &[8e307, -8e307, 1.0], Ty::Double, false), 1.0);
+        assert_eq!(r(Fcn::RowSd, &[4e307, 4e307], Ty::Double, false), 0.0);
     }
 }

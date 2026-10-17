@@ -1,21 +1,26 @@
 //! `egen`: the compute phase of fastata's egen (two-phase protocol, see `crate::cache`). The
 //! protocol with `stata/_fx_egen.ado` is in [`spec`]; the arithmetic of each function is in
-//! [`reduce`] (expression functions, per group), [`rows`] (row functions) and [`groups`]
-//! (grouping, and `group()` numbering).
+//! [`reduce`] (expression functions, per group), [`rank`] (rank of a large group), [`rows`] (row
+//! functions) and [`groups`] (grouping, and `group()` numbering).
 
 mod groups;
+mod rank;
 mod reduce;
 mod rows;
 pub mod spec;
 
+use std::cmp::Ordering as CmpOrdering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
+
 use crate::args::Args;
 use crate::cache::{self, Output, read_cols};
-use crate::error::{Error, Res, vec_filled};
+use crate::error::{Error, Res, vec_filled, vec_with_capacity};
 use crate::io::{self, Io, Rows};
 use crate::par::{StoreMode, for_blocks};
 
-use groups::{Groups, Scatter, for_groups, group_numbers, hashed_groups, key_info, one_group, read_touse, sorted_groups};
-use spec::{Fcn, Spec};
+use groups::{Groups, KeyVal, Scatter, for_groups, group_numbers, hashed_groups, key_info, one_group, read_touse, sorted_groups};
+use spec::{Fcn, RankMode, Spec, Ty, miss_count};
 
 /// What one compute phase produced.
 pub struct Computed {
@@ -25,6 +30,9 @@ pub struct Computed {
     pub nmiss: usize,
     /// `median`, `pctile`, `iqr` without by-groups: nonmissing sample values.
     pub n: Option<usize>,
+    /// `group` without `missing`: per key, numeric and integer-valued in every sample
+    /// observation whose keys are all nonmissing (empty otherwise).
+    pub keyint: Vec<bool>,
 }
 
 pub fn run<I: Io>(io: &I, a: &Args) -> Res<()> {
@@ -35,6 +43,10 @@ pub fn run<I: Io>(io: &I, a: &Args) -> Res<()> {
     io::local_save("fx_nmiss", &c.nmiss.to_string())?;
     if let Some(n) = c.n {
         io::local_save("fx_n", &n.to_string())?;
+    }
+    if !c.keyint.is_empty() {
+        let k: Vec<&str> = c.keyint.iter().map(|&b| if b { "1" } else { "0" }).collect();
+        io::local_save("fx_keyint", &k.join(" "))?;
     }
     Ok(())
 }
@@ -50,29 +62,35 @@ pub fn compute<I: Io>(io: &I, s: &Spec) -> Res<Computed> {
     let miss = io.missval();
     crate::nan::check_vars(io, &s.keys, s.threads)?;
     let touse = read_touse(io, s.touse, s.threads)?;
-    let mut nn = None;
-    let out = if s.fcn.is_keyed() {
-        keyed(io, s, touse.as_deref())?
+    if s.fcn.is_keyed() {
+        let (out, keyint) = keyed(io, s, touse.as_deref())?;
+        let nmiss = out.iter().filter(|&&v| v >= miss).count();
+        Ok(Computed { out, nmiss, n: None, keyint })
     } else if s.fcn.is_row() {
-        row_fn(io, s, touse.as_deref())?
+        let (out, nmiss) = row_fn(io, s, touse.as_deref())?;
+        Ok(Computed { out, nmiss, n: None, keyint: Vec::new() })
     } else {
-        let (o, k) = expr_fn(io, s, touse.as_deref())?;
-        nn = k;
-        o
-    };
-    let nmiss = out.iter().filter(|&&v| v >= miss).count();
-    Ok(Computed { out, nmiss, n: nn })
+        let (out, nmiss, nn) = expr_fn(io, s, touse.as_deref())?;
+        Ok(Computed { out, nmiss, n: nn, keyint: Vec::new() })
+    }
 }
 
 /// `group()` and `tag()`: groups of the sample by the varlist; without `missing`, groups with a
-/// missing key are left out (`.` for group, 0 for tag).
-fn keyed<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
+/// missing key are left out (`.` for group, 0 for tag). Also [`Computed::keyint`].
+fn keyed<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Vec<bool>)> {
     let miss = io.missval();
     let n = io.nobs();
     let g = hashed_groups(io, &s.keys, s.touse, touse, s.threads)?;
     let (info, tuples) = key_info(io, &s.keys, &g)?;
     let keep: Vec<bool> = info.has_missing.iter().map(|&m| s.missing || !m).collect();
     let tag = s.fcn == Fcn::Tag;
+    let keyint = if s.fcn == Fcn::Group && !s.missing {
+        (0..s.keys.len())
+            .map(|j| tuples.iter().zip(&keep).filter(|(_, k)| **k).all(|(t, _)| matches!(t[j], KeyVal::Num(v) if v == v.trunc())))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut out = vec_filled(n, if tag { 0.0 } else { miss })?;
     let ids = if tag { Vec::new() } else { group_numbers(&tuples, &keep) };
     let sc = Scatter::new(&mut out);
@@ -92,7 +110,7 @@ fn keyed<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
         }
         Ok(())
     })?;
-    Ok(out)
+    Ok((out, keyint))
 }
 
 /// Raw values of the expression: the variable, or for `count` with `cntflag` the flag
@@ -127,8 +145,16 @@ fn expr_values<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>>
     Ok(x)
 }
 
-/// The expression functions, per group of the sample.
-fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Option<usize>)> {
+/// `_grank`'s value for the lowest rank `lo` of `ties` tied values: `lo` (it is `_n`) stored in
+/// the type, and for the default mode that plus (ties − 1)/2, stored again.
+fn rank_value(lo: usize, ties: usize, mode: RankMode, ty: Ty, miss: f64) -> Res<f64> {
+    let lo = ty.cast(lo as f64, miss)?;
+    if mode == RankMode::Default { ty.cast(lo + (ties - 1) as f64 / 2.0, miss) } else { Ok(lo) }
+}
+
+/// The expression functions, per group of the sample: the result column, its missing values, and
+/// for median/pctile/iqr without by-groups the nonmissing sample values.
+fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, usize, Option<usize>)> {
     let miss = io.missval();
     let n = io.nobs();
     let x = expr_values(io, s, touse)?;
@@ -152,13 +178,25 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Op
     } else {
         None
     };
-    let sc = Scatter::new(&mut out);
     let ty = s.ty;
+    let field = s.rank == RankMode::Field;
+    let big_rank = |members: &[u32]| s.fcn == Fcn::Rank && members.len() >= rank::BIG;
+    // Missing results among the sample observations (the others are `.`).
+    let nm = AtomicUsize::new(0);
+    let sc = Scatter::new(&mut out);
     for_groups(io, &g, s.threads, |_gi, members, scratch| {
+        if big_rank(members) {
+            return Ok(());
+        }
+        let m = members.len();
         scratch.clear();
+        scratch.try_reserve(if s.fcn == Fcn::Rank { 2 * m } else { m }).map_err(|_| Error::oom())?;
         scratch.extend(members.iter().map(|&o| x[o as usize]));
         let put_all = |v: f64| -> Res<()> {
             let v = ty.cast(v, miss)?;
+            if miss_count(v, miss)? == 1 {
+                nm.fetch_add(m, Ordering::Relaxed);
+            }
             for &o in members {
                 // SAFETY: groups are disjoint; each group is handled by one worker.
                 unsafe { sc.set(o, v) };
@@ -166,59 +204,85 @@ fn expr_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, Op
             Ok(())
         };
         match s.fcn {
-            Fcn::Total => put_all(reduce::total(scratch, miss, by, s.missing)),
-            Fcn::Mean => put_all(reduce::mean(scratch, miss, by)),
+            Fcn::Total => put_all(reduce::total(scratch, miss, by, s.missing)?),
+            Fcn::Mean => put_all(reduce::mean(scratch, miss, by)?),
             Fcn::Count => put_all(reduce::count(scratch, miss)),
             Fcn::Max | Fcn::Min => put_all(reduce::extreme(scratch, miss, s.fcn == Fcn::Max, s.missing, by)),
-            Fcn::Sd => put_all(reduce::mean_sd(scratch, miss, by).1),
+            Fcn::Sd => put_all(reduce::mean_sd(scratch, miss, by)?.1),
             Fcn::Std => {
-                let (m, sd) = reduce::mean_sd(scratch, miss, by);
-                for (k, &o) in members.iter().enumerate() {
-                    let v = ty.cast(reduce::std_value(scratch[k], m, sd, s.sd, s.mean, miss), miss)?;
+                let (mu, sd) = reduce::mean_sd(scratch, miss, by)?;
+                let mut k = 0;
+                for (j, &o) in members.iter().enumerate() {
+                    let v = ty.cast(reduce::std_value(scratch[j], mu, sd, s.sd, s.mean, miss)?, miss)?;
+                    k += miss_count(v, miss)?;
                     // SAFETY: as above.
                     unsafe { sc.set(o, v) };
                 }
+                nm.fetch_add(k, Ordering::Relaxed);
                 Ok(())
             }
             Fcn::Median | Fcn::Pctile | Fcn::Iqr => {
                 reduce::sort_nonmiss(scratch, miss);
                 let sorted = &scratch[..];
                 let v = match (s.fcn, by) {
-                    (Fcn::Median, true) => reduce::median_by(sorted, miss),
+                    (Fcn::Median, true) => reduce::median_by(sorted, miss)?,
                     (Fcn::Median, false) => reduce::pctile_nob(sorted, 50.0, miss),
-                    (Fcn::Pctile, true) => reduce::pctile_by(sorted, s.p, miss),
+                    (Fcn::Pctile, true) => reduce::pctile_by(sorted, s.p, miss)?,
                     (Fcn::Pctile, false) => reduce::pctile_nob(sorted, s.p, miss),
-                    _ => reduce::iqr(sorted, by, miss),
+                    _ => reduce::iqr(sorted, by, miss)?,
                 };
                 put_all(v)
             }
             Fcn::Rank => {
-                let mut idx = Vec::new();
-                reduce::rank(scratch, s.rank, miss, &mut idx, |k, r| {
-                    let v = match r {
-                        None => miss,
-                        Some((lo, ties)) => {
-                            let lo = ty.cast(lo, miss)?;
-                            if s.rank == spec::RankMode::Default {
-                                ty.cast(lo + (ties - 1) as f64 / 2.0, miss)?
-                            } else {
-                                lo
-                            }
-                        }
+                // scratch: the members' values, then their nonmissing values sorted
+                for j in 0..m {
+                    let v = scratch[j];
+                    rank::check_input(v, field, miss)?;
+                    if v < miss {
+                        scratch.push(v);
+                    }
+                }
+                let (vals, sorted) = scratch.split_at_mut(m);
+                sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(CmpOrdering::Equal));
+                let mut k = 0;
+                for (j, &o) in members.iter().enumerate() {
+                    let v = vals[j];
+                    let r = if v < miss {
+                        let (lo, ties) = reduce::rank_of(sorted, v, field);
+                        rank_value(lo, ties, s.rank, ty, miss)?
+                    } else {
+                        k += 1;
+                        miss
                     };
                     // SAFETY: as above.
-                    unsafe { sc.set(members[k], v) };
-                    Ok(())
-                })
+                    unsafe { sc.set(o, r) };
+                }
+                nm.fetch_add(k, Ordering::Relaxed);
+                Ok(())
             }
             _ => unreachable!("not an expression function"),
         }
     })?;
-    Ok((out, nonmiss_total))
+    let mut nmiss = (n - g.ord.len()) + nm.into_inner();
+    if s.fcn == Fcn::Rank {
+        for gi in 0..g.len() {
+            let members = g.members(gi);
+            if big_rank(members) {
+                nmiss += rank::rank_big(io, &x, members, field, miss, s.threads, |o, lo, ties| {
+                    let v = rank_value(lo, ties, s.rank, ty, miss)?;
+                    // SAFETY: each observation of the group gets one call; no other writer.
+                    unsafe { sc.set(o, v) };
+                    Ok(())
+                })?;
+            }
+        }
+    }
+    Ok((out, nmiss, nonmiss_total))
 }
 
-/// The row functions, in parallel blocks of observations.
-fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
+/// The row functions, in parallel blocks of observations, written in place: the result column
+/// and its missing values.
+fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<(Vec<f64>, usize)> {
     let miss = io.missval();
     let n = io.nobs();
     let k = s.vals.len();
@@ -245,19 +309,24 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
     }
     let numv: Vec<i32> = s.vals.iter().zip(&strs).filter(|(_, s)| !**s).map(|(v, _)| *v).collect();
     let nn = numv.len();
-    let blocks = for_blocks(io, n.div_ceil(ROW_BLOCK), s.threads, StoreMode::Parallel, |b, _emit| {
+    let mut out = vec_filled(n, miss)?;
+    let mut slots: Vec<Mutex<&mut [f64]>> = vec_with_capacity(n.div_ceil(ROW_BLOCK))?;
+    slots.extend(out.chunks_mut(ROW_BLOCK).map(Mutex::new));
+    let counts = for_blocks(io, slots.len(), s.threads, StoreMode::Parallel, |b, _emit| {
+        let mut res = slots[b].lock().unwrap_or_else(PoisonError::into_inner);
         let first = b * ROW_BLOCK;
-        let m = ROW_BLOCK.min(n - first);
+        let m = res.len();
         let mut raw = vec_filled(m * nn, 0.0)?;
         if nn > 0 {
             io.read_block(&numv, Rows::Range { first, n: m }, &mut raw)?;
             crate::nan::check(&raw)?;
         }
-        let mut res = vec_filled(m, miss)?;
         let mut v = vec![0.0; k];
+        let mut nmiss = 0;
         for r in 0..m {
             let o = first + r;
             if touse.is_some_and(|t| !t[o]) {
+                nmiss += 1;
                 continue;
             }
             let (mut jn, mut js) = (0, 0);
@@ -270,16 +339,14 @@ fn row_fn<I: Io>(io: &I, s: &Spec, touse: Option<&[bool]>) -> Res<Vec<f64>> {
                     jn += 1;
                 }
             }
-            res[r] = rows::row(s.fcn, &v, s.ty, s.missing, miss)?;
+            let y = rows::row(s.fcn, &v, s.ty, s.missing, miss)?;
+            nmiss += miss_count(y, miss)?;
+            res[r] = y;
         }
-        Ok(res)
+        Ok(nmiss)
     })?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(n).map_err(|_| Error::oom())?;
-    for b in blocks {
-        out.extend(b);
-    }
-    Ok(out)
+    drop(slots);
+    Ok((out, counts.into_iter().sum()))
 }
 
 #[cfg(test)]

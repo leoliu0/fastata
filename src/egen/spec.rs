@@ -25,14 +25,19 @@
 //! | `threads` | 0 = every logical CPU |
 //!
 //! Result locals: `fx_token` (see `cache`), `fx_nmiss` (missing results, for egen's
-//! "(N missing values generated)"), and for `median`, `pctile`, `iqr` without by-groups `fx_n`
-//! (nonmissing sample values; 0 makes `_pctile` print "no observations").
+//! "(N missing values generated)"), for `median`, `pctile`, `iqr` without by-groups `fx_n`
+//! (nonmissing sample values; 0 makes `_pctile` print "no observations"), and for `group`
+//! without `missing` `fx_keyint`: one `0`/`1` per key, `1` when the key is numeric and integer
+//! in every sample observation whose keys are all nonmissing (`_ggroup`'s IsInteger).
 //!
 //! The arithmetic follows the original `_g<fcn>.ado` files (gated versions); the kernels document
 //! each rule. Input the fast path does not cover is a fallback: a string where a number is needed,
-//! a result that does not fit the storage type exactly, more than 2^32-1 observations, a binary
-//! strL key, both -0 and +0 among the values of `median`, `pctile` or `iqr` without by-groups
-//! (`_pctile` orders them as ties, in an order of its own) [signed zero].
+//! a result that does not fit the storage type exactly, a binary strL key, both -0 and +0 among
+//! the values of `median`, `pctile` or `iqr` without by-groups (`_pctile` orders them as ties, in
+//! an order of its own) [signed zero], and an intermediate result at or beyond `.` in absolute
+//! value, infinite or NaN where Stata's arithmetic would differ from f64's [overflow] (see
+//! [`checked`]). More than 2^31-1 observations never reach the plugin: `_fx_call` falls back
+//! first (SPI 3.0 reports `_N` as a C `int`).
 
 use crate::args::Args;
 use crate::error::{Error, Res};
@@ -155,10 +160,46 @@ impl Ty {
     }
 }
 
-/// An arithmetic result as Stata keeps it: NaN, infinities and magnitudes at or above `.` are `.`.
+/// A final result whose operands are below `.`: NaN, infinities (`0/0`, `x/0`) and magnitudes at
+/// or beyond `.` are `.`. Only where Stata's result is `.` too (divisions, `summarize`'s
+/// results); intermediate results that Stata keeps raw go through [`checked`].
 #[inline]
 pub fn arith(x: f64, miss: f64) -> f64 {
     if x.abs() < miss { x } else { miss }
+}
+
+/// Fallback reason when an intermediate result leaves the range Stata and f64 agree on.
+pub const OVERFLOW: &str = "overflow";
+
+/// An intermediate result of Stata arithmetic on nonmissing operands, when it is below `.` in
+/// absolute value; otherwise a fallback [overflow]. Stata keeps a finite result at or beyond
+/// `.` raw (a positive one is then a missing value that the next operation turns into `.`, a
+/// negative one an ordinary number), stores ±inf as `.`, and `sum()` adds −inf: none of which
+/// f64 arithmetic followed by [`arith`] reproduces.
+#[inline]
+pub fn checked(x: f64, miss: f64) -> Res<f64> {
+    if x.abs() < miss { Ok(x) } else { Err(Error::fallback(OVERFLOW)) }
+}
+
+/// Whether `v` (>= `.`) is one of Stata's 27 missing codes `.`, `.a`, ..., `.z` rather than a raw
+/// result beyond `.` (which Stata's "(N missing values generated)" does not count).
+#[inline]
+pub fn is_code(v: f64, miss: f64) -> bool {
+    let d = v.to_bits().wrapping_sub(miss.to_bits());
+    d & ((1 << 40) - 1) == 0 && d >> 40 <= 26
+}
+
+/// Counts a result value as missing (`v >= .`): 1 for a missing code, 0 for a number, and a
+/// fallback [overflow] for a raw value beyond `.`.
+#[inline]
+pub fn miss_count(v: f64, miss: f64) -> Res<usize> {
+    if v < miss {
+        Ok(0)
+    } else if is_code(v, miss) {
+        Ok(1)
+    } else {
+        Err(Error::fallback(OVERFLOW))
+    }
 }
 
 /// Parses Stata's `%21x` text, e.g. `+1.8000000000000X+001` (= 3) or `+0.0000000000000X-3ff`
