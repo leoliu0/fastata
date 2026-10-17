@@ -1,13 +1,11 @@
 //! `isid` and `dup`: compute phases of fastata's isid and duplicates (slice B).
 //!
 //! Both group observations by the key tuple of their varlist (numeric, str# or strL keys) the
-//! way Stata's `by` groups data sorted by those keys: two observations are in one group when
-//! every numeric key has the same value (−0 equals +0; each missing code is a value of its own)
-//! and every string key has the same bytes. Data whose sample observations are already in key
-//! order is grouped by runs; other data by hashing (fixed partitions, so group ids never depend
-//! on the thread count). Group order is Stata's sort order where it matters (`examples`,
-//! `list`): numbers by raw value (`.` < `.a` < ... < `.z` after every number), strings bytewise
-//! with a prefix first, tuples lexicographically in varlist order.
+//! way Stata's `by` groups data sorted by those keys (see `crate::group`: −0 equals +0, each
+//! missing code is a value of its own, strings compare bytewise). Where order matters
+//! (`examples`, `list`) groups follow Stata's sort order: numbers by raw value (`.` < `.a` < ...
+//! < `.z` after every number), strings bytewise with a prefix first, tuples lexicographically in
+//! varlist order. A NaN in a key (any observation) falls back.
 //!
 //! `isid`: varlist = the keys. Keys `missok` (0/1) and `threads`. Locals:
 //! - `fx_nmiss`: observations with a missing key (a numeric missing code, or "" in a string);
@@ -34,337 +32,27 @@
 //!   observation of those groups, ascending inside a group (observation, 1-based; Group). The
 //!   ado stores them into a frame of `fx_nlist` observations.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::args::Args;
 use crate::cache::{self, Output};
 use crate::error::{Error, Res, vec_filled, vec_with_capacity};
+use crate::group::{Keyed, Need, ReadOpts, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, vec_zeroed};
 use crate::io::{self, Io};
-use crate::par::{StoreMode, for_blocks};
-
-/// Sample positions per work item.
-const CHUNK: usize = 65_536;
-/// Hash partitions (top 8 hash bits); fixed, so group ids do not depend on the thread count.
-const PARTS: usize = 256;
-/// Group id of a non-sample observation.
-const NONE: u32 = u32::MAX;
-
-#[derive(Clone, Copy)]
-enum Kind {
-    Num(usize),
-    Str(usize),
-}
-
-/// One string key: the bytes of observation `obs` are `bytes[off[obs]..off[obs + 1]]`.
-struct StrCol {
-    off: Vec<usize>,
-    bytes: Vec<u8>,
-}
-
-impl StrCol {
-    fn get(&self, obs: usize) -> &[u8] {
-        &self.bytes[self.off[obs]..self.off[obs + 1]]
-    }
-}
-
-/// Key values by observation. Numeric keys hold every observation with −0 stored as +0;
-/// string keys hold the sample observations (others are empty).
-struct Keys {
-    kinds: Vec<Kind>,
-    num: Vec<Vec<f64>>,
-    strs: Vec<StrCol>,
-}
-
-fn mix(mut z: u64) -> u64 {
-    // splitmix64 finalizer
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &b in bytes {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-impl Keys {
-    /// Reads varlist positions `vars` (numeric columns in parallel, strings serially, only at
-    /// the sample positions `samp`, every observation when `None`).
-    fn read<I: Io>(io: &I, vars: &[i32], samp: Option<&[u32]>, threads: usize) -> Res<Keys> {
-        let n = io.nobs();
-        let mut kinds = Vec::with_capacity(vars.len());
-        let mut numv = Vec::new();
-        let mut strv = Vec::new();
-        for &v in vars {
-            if io.is_str(v) {
-                kinds.push(Kind::Str(strv.len()));
-                strv.push(v);
-            } else {
-                kinds.push(Kind::Num(numv.len()));
-                numv.push(v);
-            }
-        }
-        let mut num = cache::read_cols(io, &numv, threads)?;
-        // A NaN key: Stata's sort (which isid and duplicates run) never returns.
-        for c in &num {
-            crate::nan::check(c)?;
-        }
-        for x in num.iter_mut().flatten() {
-            if *x == 0.0 {
-                *x = 0.0;
-            }
-        }
-        let mut strs = Vec::with_capacity(strv.len());
-        for &v in &strv {
-            let mut off = vec_filled(n + 1, 0usize)?;
-            let mut bytes = Vec::new();
-            match samp {
-                None => {
-                    for obs in 0..n {
-                        io.read_str(v, obs, &mut bytes)?;
-                        off[obs + 1] = bytes.len();
-                    }
-                }
-                Some(s) => {
-                    // off stays flat (empty values) between sample observations
-                    let mut next = 0;
-                    for &o in s {
-                        let o = o as usize;
-                        for x in &mut off[next + 1..=o] {
-                            *x = bytes.len();
-                        }
-                        io.read_str(v, o, &mut bytes)?;
-                        off[o + 1] = bytes.len();
-                        next = o + 1;
-                    }
-                    for x in &mut off[next + 1..] {
-                        *x = bytes.len();
-                    }
-                }
-            }
-            strs.push(StrCol { off, bytes });
-        }
-        Ok(Keys { kinds, num, strs })
-    }
-
-    /// Stata's sort order of the key tuples of observations `a` and `b`.
-    fn cmp(&self, a: usize, b: usize) -> Ordering {
-        for kind in &self.kinds {
-            let o = match *kind {
-                Kind::Num(c) => self.num[c][a].total_cmp(&self.num[c][b]),
-                Kind::Str(c) => self.strs[c].get(a).cmp(self.strs[c].get(b)),
-            };
-            if o != Ordering::Equal {
-                return o;
-            }
-        }
-        Ordering::Equal
-    }
-
-    fn eq(&self, a: usize, b: usize) -> bool {
-        self.num.iter().all(|c| c[a].to_bits() == c[b].to_bits()) && self.strs.iter().all(|s| s.get(a) == s.get(b))
-    }
-
-    fn hash(&self, i: usize) -> u64 {
-        let mut h: u64 = 0x9e37_79b9_7f4a_7c15;
-        for kind in &self.kinds {
-            let kh = match *kind {
-                Kind::Num(c) => mix(self.num[c][i].to_bits()),
-                Kind::Str(c) => fnv1a(self.strs[c].get(i)),
-            };
-            h = mix(h ^ kh);
-        }
-        h
-    }
-
-    /// Observations (of `0..n`) with any missing key: a numeric missing code or "".
-    fn count_missing<I: Io>(&self, io: &I, n: usize, threads: usize) -> Res<usize> {
-        let miss = io.missval();
-        let parts = for_blocks(io, n.div_ceil(CHUNK), threads, StoreMode::Parallel, |c, _emit| {
-            let lo = c * CHUNK;
-            let hi = (lo + CHUNK).min(n);
-            Ok((lo..hi)
-                .filter(|&i| {
-                    self.num.iter().any(|col| io::is_miss(col[i], miss)) || self.strs.iter().any(|s| s.get(i).is_empty())
-                })
-                .count())
-        })?;
-        Ok(parts.iter().sum())
-    }
-
-    /// [string blanks] when a string value starts or ends with a byte outside 0x21..=0x7e.
-    fn check_blanks(&self) -> Res<()> {
-        let bad = |b: u8| b <= 0x20 || b >= 0x7f;
-        for s in &self.strs {
-            for obs in 0..s.off.len() - 1 {
-                let v = s.get(obs);
-                if let (Some(&f), Some(&l)) = (v.first(), v.last())
-                    && (bad(f) || bad(l))
-                {
-                    return Err(Error::fallback("string blanks"));
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Groups of the sample observations: `size[g]` observations, the lowest being `first[g]`;
-/// `gid[obs]` (when requested) is the group of each observation, [`NONE`] outside the sample.
-struct Groups {
-    gid: Vec<u32>,
-    size: Vec<u32>,
-    first: Vec<u32>,
-}
-
-/// Groups the sample observations `samp` (ascending) of `0..n` by key tuple.
-fn group<I: Io>(io: &I, k: &Keys, samp: &[u32], n: usize, need_gid: bool, threads: usize) -> Res<Groups> {
-    let ns = samp.len();
-    let mut gid = if need_gid { vec_filled(n, NONE)? } else { Vec::new() };
-    if ns == 0 {
-        return Ok(Groups { gid, size: Vec::new(), first: Vec::new() });
-    }
-
-    // Already in key order? Then groups are the runs of equal tuples.
-    let runs = for_blocks(io, ns.div_ceil(CHUNK), threads, StoreMode::Parallel, |c, _emit| {
-        let lo = c * CHUNK;
-        let hi = (lo + CHUNK).min(ns);
-        let mut starts = Vec::new();
-        for p in lo.max(1)..hi {
-            match k.cmp(samp[p - 1] as usize, samp[p] as usize) {
-                Ordering::Less => starts.push(p),
-                Ordering::Equal => {}
-                Ordering::Greater => return Ok(None),
-            }
-        }
-        Ok(Some(starts))
-    })?;
-    if runs.iter().all(Option::is_some) {
-        let ng = 1 + runs.iter().map(|r| r.as_ref().map_or(0, Vec::len)).sum::<usize>();
-        let mut size = vec_with_capacity(ng)?;
-        let mut first = vec_with_capacity(ng)?;
-        let mut prev = 0;
-        for s in runs.into_iter().flatten().flatten().chain(std::iter::once(ns)) {
-            let g = size.len() as u32;
-            size.push((s - prev) as u32);
-            first.push(samp[prev]);
-            if need_gid {
-                for &o in &samp[prev..s] {
-                    gid[o as usize] = g;
-                }
-            }
-            prev = s;
-        }
-        return Ok(Groups { gid, size, first });
-    }
-
-    // Hashes, then a stable bucketing of the sample positions by partition.
-    let chunks = for_blocks(io, ns.div_ceil(CHUNK), threads, StoreMode::Parallel, |c, _emit| {
-        let lo = c * CHUNK;
-        let hi = (lo + CHUNK).min(ns);
-        Ok((lo..hi).map(|p| k.hash(samp[p] as usize)).collect::<Vec<u64>>())
-    })?;
-    let mut h = vec_with_capacity(ns)?;
-    for c in chunks {
-        h.extend(c);
-    }
-    let part_of = |p: usize| (h[p] >> 56) as usize;
-    let mut pstart = [0usize; PARTS + 1];
-    for p in 0..ns {
-        pstart[part_of(p) + 1] += 1;
-    }
-    for p in 0..PARTS {
-        pstart[p + 1] += pstart[p];
-    }
-    let mut fill = pstart;
-    let mut pidx = vec_filled(ns, 0u32)?;
-    for p in 0..ns {
-        let q = part_of(p);
-        pidx[fill[q]] = p as u32;
-        fill[q] += 1;
-    }
-
-    // Per partition: open addressing, ids in order of first appearance.
-    const EMPTY: u32 = u32::MAX;
-    let per_part = for_blocks(io, PARTS, threads, StoreMode::Parallel, |q, _emit| {
-        let members = &pidx[pstart[q]..pstart[q + 1]];
-        let cap = (2 * members.len()).next_power_of_two().max(16);
-        let mask = cap - 1;
-        let mut table: Vec<(u64, u32, u32)> = vec_filled(cap, (0, EMPTY, 0))?;
-        let mut lid = if need_gid { vec_filled(members.len(), 0u32)? } else { Vec::new() };
-        let mut size: Vec<u32> = Vec::new();
-        let mut first: Vec<u32> = Vec::new();
-        for (m, &p) in members.iter().enumerate() {
-            let hp = h[p as usize];
-            let obs = samp[p as usize];
-            let mut slot = hp as usize & mask;
-            let id = loop {
-                let (eh, rep, id) = table[slot];
-                if rep == EMPTY {
-                    let id = size.len() as u32;
-                    table[slot] = (hp, obs, id);
-                    size.push(1);
-                    first.push(obs);
-                    break id;
-                }
-                if eh == hp && k.eq(rep as usize, obs as usize) {
-                    size[id as usize] += 1;
-                    break id;
-                }
-                slot = (slot + 1) & mask;
-            };
-            if need_gid {
-                lid[m] = id;
-            }
-        }
-        Ok((lid, size, first))
-    })?;
-
-    let ng: usize = per_part.iter().map(|p| p.1.len()).sum();
-    let mut size = vec_with_capacity(ng)?;
-    let mut first = vec_with_capacity(ng)?;
-    for (q, (lid, s, f)) in per_part.into_iter().enumerate() {
-        let base = size.len() as u32;
-        if need_gid {
-            for (m, &p) in pidx[pstart[q]..pstart[q + 1]].iter().enumerate() {
-                gid[samp[p as usize] as usize] = base + lid[m];
-            }
-        }
-        size.extend(s);
-        first.extend(f);
-    }
-    Ok(Groups { gid, size, first })
-}
-
-fn check_nobs(n: usize) -> Res<()> {
-    if n >= u32::MAX as usize {
-        return Err(Error::fallback("over 4294967294 observations"));
-    }
-    Ok(())
-}
 
 /// What `isid` reports: (observations with a missing key, distinct tuples when computed).
 fn isid_counts<I: Io>(io: &I, missok: bool, threads: usize) -> Res<(usize, Option<usize>)> {
-    let n = io.nobs();
-    check_nobs(n)?;
     let vars: Vec<i32> = (1..=io.nvars() as i32).collect();
     if vars.is_empty() {
         return Err(Error::syntax("fastata plugin: isid needs key variables"));
     }
-    let k = Keys::read(io, &vars, None, threads)?;
-    k.check_blanks()?;
-    let nmiss = k.count_missing(io, n, threads)?;
+    let k = Keyed::read(io, &vars, None, threads, ReadOpts { miss: true, blanks: true })?;
+    let nmiss = k.nmiss();
     if !missok && nmiss > 0 {
         return Ok((nmiss, None));
     }
-    let samp: Vec<u32> = (0..n as u32).collect();
-    let g = group(io, &k, &samp, n, false, threads)?;
-    Ok((nmiss, Some(g.size.len())))
+    let g = k.group(io, threads, Need::default())?;
+    Ok((nmiss, Some(g.ngroups)))
 }
 
 pub fn run_isid<I: Io>(io: &I, a: &Args) -> Res<()> {
@@ -404,93 +92,109 @@ struct DupResult {
 
 fn dup_compute<I: Io>(io: &I, sub: Sub, touse: bool, threads: usize) -> Res<DupResult> {
     let n = io.nobs();
-    check_nobs(n)?;
     let nv = io.nvars();
     let nk = nv.checked_sub(usize::from(touse)).filter(|&k| k > 0);
     let Some(nk) = nk else {
         return Err(Error::syntax("fastata plugin: dup needs key variables"));
     };
     let vars: Vec<i32> = (1..=nk as i32).collect();
-    let samp: Vec<u32> = if touse {
-        let t = cache::read_cols(io, &[nv as i32], threads)?.pop().unwrap_or_default();
-        let ns = t.iter().filter(|&&x| x != 0.0).count();
-        let mut s = vec_with_capacity(ns)?;
-        s.extend(t.iter().enumerate().filter(|(_, x)| **x != 0.0).map(|(i, _)| i as u32));
-        s
-    } else {
-        (0..n as u32).collect()
-    };
-    let ns = samp.len();
+    let samp = if touse { Some(sample_from_bools(io, &read_flags(io, nv as i32, threads)?, threads)?) } else { None };
+    let ns = samp.as_ref().map_or(n, Vec::len);
     let mut r = DupResult { n: ns, ..DupResult::default() };
     if ns == 0 {
         return Ok(r);
     }
-    let k = Keys::read(io, &vars, touse.then_some(&samp[..]), threads)?;
-    let g = group(io, &k, &samp, n, sub != Sub::Report, threads)?;
-    let ng = g.size.len();
+    let k = Keyed::read(io, &vars, samp, threads, ReadOpts::default())?;
+    let need = match sub {
+        Sub::Report => Need { sizes: true, ..Need::default() },
+        Sub::Tag => Need { gid: true, sizes: true, ..Need::default() },
+        Sub::Drop => Need { gid: true, reps: true, ..Need::default() },
+        Sub::Examples | Sub::List => Need { gid: true, reps: true, sizes: true, ..Need::default() },
+    };
+    let g = k.group(io, threads, need)?;
+    let ng = g.ngroups;
     r.nuniq = ng;
     match sub {
         Sub::Report => {
             let mut by_size: BTreeMap<u64, u64> = BTreeMap::new();
-            for &s in &g.size {
+            for &s in &g.sizes {
                 *by_size.entry(u64::from(s)).or_default() += u64::from(s);
             }
             r.table = by_size.into_iter().map(|(c, f)| (c, f, f as f64 - f as f64 / c as f64)).collect();
         }
         Sub::Tag => {
-            let mut col = vec_filled(n, f64::NAN)?;
-            for &o in &samp {
-                col[o as usize] = f64::from(g.size[g.gid[o as usize] as usize] - 1);
-            }
-            r.max = g.size.iter().map(|&s| f64::from(s - 1)).fold(0.0, f64::max);
+            let mut col = par_map(io, n, threads, |_| Ok(f64::NAN))?;
+            let sh = Shared::new(&mut col);
+            par_for(io, ns, threads, |p| {
+                // SAFETY: each sample position is its own observation.
+                unsafe { sh.set(k.obs(p), f64::from(g.sizes[g.gid[p] as usize] - 1)) };
+                Ok(())
+            })?;
+            r.max = g.sizes.iter().map(|&s| f64::from(s - 1)).fold(0.0, f64::max);
             r.out = Some(Output { nums: vec![col], strs: Vec::new() });
         }
         Sub::Drop => {
             r.ndrop = ns - ng;
             if r.ndrop > 0 {
-                let mut col = vec_filled(n, 0.0)?;
-                for &o in &samp {
-                    if g.first[g.gid[o as usize] as usize] != o {
-                        col[o as usize] = 1.0;
+                let mut col = vec_zeroed(n)?;
+                let sh = Shared::new(&mut col);
+                par_for(io, ns, threads, |p| {
+                    if g.reps[g.gid[p] as usize] as usize != p {
+                        // SAFETY: as above.
+                        unsafe { sh.set(k.obs(p), 1.0) };
                     }
-                }
+                    Ok(())
+                })?;
                 r.out = Some(Output { nums: vec![col], strs: Vec::new() });
             }
         }
         Sub::Examples | Sub::List => {
-            let mut dups: Vec<u32> = (0..ng as u32).filter(|&q| g.size[q as usize] > 1).collect();
-            dups.sort_unstable_by(|&a, &b| k.cmp(g.first[a as usize] as usize, g.first[b as usize] as usize));
+            // duplicated groups, in sort order of their keys
+            let mut dups = vec_with_capacity(g.sizes.iter().filter(|&&s| s > 1).count())?;
+            dups.extend((0..ng as u32).filter(|&q| g.sizes[q as usize] > 1));
             r.ndup = dups.len();
-            if r.ndup > 0 {
-                let nums = if sub == Sub::Examples {
-                    r.nlist = r.ndup;
-                    let order = dups.iter().map(|&q| f64::from(g.first[q as usize]) + 1.0).collect();
-                    let dgroup = (1..=r.ndup).map(|i| i as f64).collect();
-                    let ngroup = dups.iter().map(|&q| f64::from(g.size[q as usize])).collect();
-                    vec![order, dgroup, ngroup]
-                } else {
-                    // offsets of each duplicated group (by Group) in the listing
-                    let mut rank = vec_filled(ng, 0u32)?;
-                    let mut off = vec_filled(r.ndup + 1, 0usize)?;
-                    for (i, &q) in dups.iter().enumerate() {
-                        rank[q as usize] = i as u32 + 1;
-                        off[i + 1] = off[i] + g.size[q as usize] as usize;
-                    }
-                    r.nlist = off[r.ndup];
-                    let mut order = vec_filled(r.nlist, 0.0)?;
-                    let mut dgroup = vec_filled(r.nlist, 0.0)?;
-                    for &o in &samp {
-                        let rk = rank[g.gid[o as usize] as usize] as usize;
-                        if rk > 0 {
-                            order[off[rk - 1]] = f64::from(o) + 1.0;
-                            dgroup[off[rk - 1]] = rk as f64;
-                            off[rk - 1] += 1;
-                        }
-                    }
-                    vec![order, dgroup]
-                };
-                r.out = Some(Output { nums, strs: Vec::new() });
+            if r.ndup == 0 {
+                return Ok(r);
             }
+            let mut reps = vec_with_capacity(r.ndup)?;
+            reps.extend(dups.iter().map(|&q| g.reps[q as usize]));
+            let rk = k.rep_keys(io, &reps, threads)?;
+            let mut idx = vec_with_capacity(r.ndup)?;
+            idx.extend(0..r.ndup as u32);
+            par_sort_by(io, &mut idx, threads, |&a, &b| rk.view().cmp(rk.pos(a as usize), rk.pos(b as usize)))?;
+            let first = |i: u32| k.obs(reps[i as usize] as usize) as f64 + 1.0;
+            let nums = if sub == Sub::Examples {
+                r.nlist = r.ndup;
+                let mut order = vec_with_capacity(r.ndup)?;
+                order.extend(idx.iter().map(|&i| first(i)));
+                let mut dgroup = vec_with_capacity(r.ndup)?;
+                dgroup.extend((1..=r.ndup).map(|i| i as f64));
+                let mut ngroup = vec_with_capacity(r.ndup)?;
+                ngroup.extend(idx.iter().map(|&i| f64::from(g.sizes[dups[i as usize] as usize])));
+                vec![order, dgroup, ngroup]
+            } else {
+                // offsets of each duplicated group (by Group) in the listing
+                let mut rank = vec_zeroed(ng)?;
+                let mut off = vec_filled(r.ndup + 1, 0usize)?;
+                for (j, &i) in idx.iter().enumerate() {
+                    let q = dups[i as usize] as usize;
+                    rank[q] = j as u32 + 1;
+                    off[j + 1] = off[j] + g.sizes[q] as usize;
+                }
+                r.nlist = off[r.ndup];
+                let mut order = vec_filled(r.nlist, 0.0)?;
+                let mut dgroup = vec_filled(r.nlist, 0.0)?;
+                for p in 0..ns {
+                    let rk = rank[g.gid[p] as usize] as usize;
+                    if rk > 0 {
+                        order[off[rk - 1]] = k.obs(p) as f64 + 1.0;
+                        dgroup[off[rk - 1]] = rk as f64;
+                        off[rk - 1] += 1;
+                    }
+                }
+                vec![order, dgroup]
+            };
+            r.out = Some(Output { nums, strs: Vec::new() });
         }
     }
     Ok(r)
@@ -732,6 +436,35 @@ mod tests {
         let c = io.add_str(vec![b"x".to_vec(), b"a b".to_vec(), Vec::new()]);
         io.push_var(c);
         assert_eq!(isid_counts(&io, true, 1).unwrap(), (1, Some(3)));
+    }
+
+    /// More keys than `group::STORED_KEYS` (the three keys twice: the same groups): rows are
+    /// hashed and groups checked against the data; every subcommand and isid still match the
+    /// naive reference for 1 and 5 threads.
+    #[test]
+    fn wide_keys_match_naive_reference() {
+        let subs = [Sub::Report, Sub::Tag, Sub::Drop, Sub::Examples, Sub::List];
+        for &(n, ng) in &[(7, 2), (8193, 4000), (70_000, 5), (70_000, 1 << 40)] {
+            for touse in [false, true] {
+                let mut d = data(n, n as u64 + 5, ng, false, touse);
+                let (k, t) = (d.io.varlist[..3].to_vec(), d.io.varlist[3..].to_vec());
+                d.io.varlist = [k.clone(), k, t].concat();
+                for &sub in &subs {
+                    let want = naive_dup(&d, sub, touse);
+                    for threads in [1, 5] {
+                        let got = dup_compute(&d.io, sub, touse, threads).unwrap();
+                        assert!(same(&got, &want), "n={n} touse={touse} {sub:?} threads={threads}");
+                    }
+                }
+                if !touse {
+                    let m = naive(&d, false);
+                    let nmiss = d.tuples.iter().filter(|t| t[0] >= K::N(nkey(MISS)) || t[2] == K::S(vec![])).count();
+                    for threads in [1, 4] {
+                        assert_eq!(isid_counts(&d.io, true, threads).unwrap(), (nmiss, Some(m.len())));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

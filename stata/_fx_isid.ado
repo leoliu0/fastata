@@ -17,12 +17,14 @@ program _fx_isid
 		}
 		if "`fx_why'" == "" {
 			capture syntax varlist [, Sort Missok]
+			if _rc == 1 exit 1
 			if _rc local fx_why syntax
 		}
 		if "`fx_why'" == "" {
-			_fx threads
+			local fx_threads = cond(c(MP), c(processors), 0)
 			local mok = ("`missok'" != "")
 			_fx_call `varlist', isid "missok=`mok'" "threads=`fx_threads'"
+			if `fx_plugrc' == 1 exit 1
 			if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			else if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 		}
@@ -64,6 +66,11 @@ program _fx_isid
 				di as err `"`s(msg)' `does' not uniquely identify the observations"'
 			}
 			if `rc' exit `rc'
+			* c(rc) as the original leaves it on success: its last capture tests whether the last
+			* key is a string variable (7 when numeric; for a string, the assert after it gives 0).
+			* On the errors both end with _format_list's captures.
+			local last : word `: word count `varlist'' of `varlist'
+			capture confirm string variable `last'
 			exit
 		}
 	}

@@ -96,6 +96,66 @@ ff "isid su id" isid fallback
 ff "isid nosuchvar" isid fallback
 ff "isid id, foo" isid fallback
 
+* ---------------------------------------------------------------- isid and duplicates: grouping
+* kernel. More than 4 keys (rows hashed, groups of equal hashes checked against the data), data
+* already in key order (groups by runs), more than 65,536 observations (hash partitions).
+frame copy base bw
+frame bw: quietly expand 3
+ff "isid id g gbig s xb" isid fast
+ff "isid g gbig s sl xb x2" isid fast
+ff "isid id g gbig s xb x2, missok" isid fast
+ff "isid sw id2 g gbig s xb" isid fast
+ff "isid id g gbig s xb" isid fast bw
+ff "isid id zi" isid fast bw
+ff "isid g id" isid fast bg
+ff "isid g id x2, missok" isid fast bg
+ff "duplicates report g gbig s sc xb" duplicates fast
+ff "duplicates report id g gbig s xb" duplicates fast bw
+ff "duplicates report g id" duplicates fast bg
+ff "duplicates report id" duplicates fast bw
+ff "duplicates tag id gbig s sl xb, gen(dt)" duplicates fast bw
+ff "duplicates tag g id, gen(dt)" duplicates fast bg
+ff "duplicates tag id2 zi, gen(dt)" duplicates fast bw
+ff "duplicates drop id gbig s sl xb if u < .6, force" duplicates fast bw
+ff "duplicates drop id, force" duplicates fast bw
+ff "duplicates examples id g s sc xb in 1/3000" duplicates fast bw
+ff "duplicates list id g gbig s xb if id < 40" duplicates fast bw
+
+* ---------------------------------------------------------------- isid: c(rc) afterwards
+* On success the original leaves the code of its last capture: 7 when the last key is numeric,
+* 0 when it is a string (help fastata's contract covers c(rc)).
+capture program drop rc_after
+program rc_after
+	args cmd
+	frame copy base _rcf
+	frame _rcf {
+		quietly fastata off
+		capture error 123
+		`cmd'
+		local a = c(rc)
+		quietly fastata on
+		* fast calls of isid so far (fastata's counters)
+		mata: st_local("f0", strofreal(asarray(*findexternal("_fx_cnt"), "isid")[1]))
+		capture error 123
+		`cmd'
+		local b = c(rc)
+		mata: st_local("f1", strofreal(asarray(*findexternal("_fx_cnt"), "isid")[1]))
+	}
+	frame drop _rcf
+	if `a' != `b' | `f1' != `f0' + 1 {
+		di as err `"`cmd': c(rc) `a' with fastata off, `b' on (fast calls `f0' -> `f1')"'
+		exit 9
+	}
+	global FD_N = $FD_N + 1
+end
+rc_after "isid id"
+rc_after "isid s id"
+rc_after "isid id s"
+rc_after "isid id sl"
+rc_after "isid id, sort"
+rc_after "isid x2 id, missok"
+rc_after "quietly isid id g"
+
 * ---------------------------------------------------------------- duplicates report
 ff "duplicates report g" duplicates fast
 ff "duplicates report id" duplicates fast

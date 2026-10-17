@@ -181,8 +181,42 @@ static void test_dup_empty(void) {
     reset_outputs();
 }
 
+/* More key variables than the plugin keeps (V_G and V_SKEY repeated: the same groups as the pair),
+   so rows are hashed and groups of equal hashes are re-read through the SPI (observation lists):
+   report and drop counts match the naive groups of (V_G, V_SKEY) over the sample V_O4. */
+static void test_dup_wide(void) {
+    static long cnt[51 * 37];
+    for (int i = 0; i < NOBS; i++) num[V_O4][i] = i % 3 != 0;
+    memset(cnt, 0, sizeof cnt);
+    long ns = 0, ng = 0;
+    for (int i = 0; i < NOBS; i++) {
+        if (!num[V_O4][i]) continue;
+        ns++;
+        if (cnt[dup_key(i)]++ == 0) ng++;
+    }
+    int vars[] = {V_G, V_SKEY, V_G, V_SKEY, V_G, V_O4, -1};
+    for (int t = 0; t < 2; t++) {
+        const char *th = t ? "threads=4" : "threads=1";
+        char what[80];
+        snprintf(what, sizeof what, "dup wide keys (%s)", th);
+        const char *ra[] = {"dup", "phase=compute", "sub=report", "touse=1", th, NULL};
+        int rc = call(vars, ra);
+        int ok = !rc;
+        if (rc) fail(what, last_err);
+        dup_check_local(what, "_fx_n", ns, &ok);
+        dup_check_local(what, "_fx_nuniq", ng, &ok);
+        const char *da[] = {"dup", "phase=compute", "sub=drop", "touse=1", th, NULL};
+        rc = call(vars, da);
+        if (ok && rc) { fail(what, last_err); ok = 0; }
+        dup_check_local(what, "_fx_ndrop", ns - ng, &ok);
+        if (ok) pass(what);
+    }
+    reset_outputs();
+}
+
 static void tests_dup(void) {
     test_isid();
     test_dup_kinds();
     test_dup_empty();
+    test_dup_wide();
 }

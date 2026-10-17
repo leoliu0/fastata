@@ -200,6 +200,27 @@ te "egen v = group(g), autotype" fallback
 te "by g: egen v = group(s)" fallback bg
 te "egen v = tag(g), by(s)" fallback
 te "egen v = group()" fallback
+* group and tag, grouping kernel: data already in key order (groups by runs), more than 4 keys
+* (rows hashed, groups of equal hashes checked against the data), more than 65,536 observations
+* (hash partitions), many groups (numbering by a parallel sort)
+frame copy default bx3
+frame bx3: quietly expand 3
+te "egen v = group(g id)" fast bg
+te "egen v = tag(g)" fast bg
+te "egen v = group(g) if u < .5" fast bg
+te "egen v = tag(g s) in 100/20000" fast bg
+te "egen v = group(s id)" fast bs
+te "egen v = group(g gbig s sl xb)" fast
+te "egen v = tag(g gbig s sl xb), missing" fast
+te "egen v = group(gm gbig se xb x2) if u < .7" fast
+te "egen v = group(gm gbig se xb x2) if u < .7, missing" fast
+te "egen v = group(id)" fast bx3
+te "egen v = group(id2 zi)" fast bx3
+te "egen v = group(s id) if u < .8" fast bx3
+te "egen v = group(x1 gm)" fast bx3
+te "egen v = tag(id)" fast bx3
+te "egen v = tag(gm se) if u < .5" fast bx3
+te "egen v = tag(sl x1 gbig g xb)" fast bx3
 
 * ---- row functions
 foreach smp of local samples {
