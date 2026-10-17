@@ -26,14 +26,20 @@
 //! frequency weight, in any observation [weight values]; xtile with nq > fx_n0 + 1, an empty sample,
 //! pctile/plist with more percentiles than observations [error]; both -0 and +0 in the sample
 //! (`_pctile` orders them as ties) [signed zero]; a weighted percentile within the band where
-//! `_pctile`'s tolerance or summation order decides [weighted tolerance].
+//! `_pctile`'s tolerance or summation order decides [weighted tolerance]; a percentile that is
+//! not a number below `.` (the average of two values below -8.988e307 is -inf, which `_pctile`
+//! returns as `.`), or a total weight that overflows when multiplied by nq (or 100) [overflow].
+//!
+//! The observations are split into chunks by their number alone, never by the thread count; each
+//! chunk's sample is sorted, and every percentile is found by a search over the sorted chunks.
+//! Results are therefore the same for any thread count.
 
 use crate::args::Args;
 use crate::cache::{self, Output, read_cols};
 use crate::error::{Error, Res, vec_filled, vec_with_capacity};
 use crate::io::{self, Io};
-use crate::par::{StoreMode, for_blocks, resolve_threads};
-use crate::quant::{Need, Pos, Weighted, need_altdef, need_default};
+use crate::par::{StoreMode, for_blocks, threads_for_rows};
+use crate::quant::{Need, Pos, Runs, need_altdef, need_default, noise, weighted_pctile};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -156,18 +162,25 @@ const POS_ZERO: u64 = 1u64 << 63; // key(+0.0)
 #[derive(Default)]
 struct Chunk {
     n0: usize,
-    /// Keys of the sample's x values: sorted (unweighted) or in observation order (weighted).
+    /// Keys of the sample's x values, sorted (with weights: by key, then by weight).
     keys: Vec<u64>,
+    /// With weights: the weights in the order of `keys`, and their running sums (`prefix[i]` is
+    /// the sum of the first i weights).
     ws: Vec<f64>,
+    prefix: Vec<f64>,
     neg_weight: bool,
     nonint_fw: bool,
+    /// A sample weight is not an integer.
+    nonint_w: bool,
     /// The sample has x = -0 / x = +0.
     neg_zero: bool,
     pos_zero: bool,
 }
 
-/// Rows per chunk of the gathering and category passes, at least.
+/// Observations per chunk, at least.
 const MIN_CHUNK: usize = 1 << 16;
+/// Most chunks: every step of a percentile search does a binary search in each chunk.
+const MAX_CHUNKS: usize = 64;
 
 pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
     let nobs = io.nobs();
@@ -199,14 +212,19 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
         }
     };
 
-    let nchunks = resolve_threads(threads, nobs.div_ceil(MIN_CHUNK).max(1));
+    // The chunks depend on the number of observations only, so results do not depend on threads.
+    let nchunks = nobs.div_ceil(MIN_CHUNK).clamp(1, MAX_CHUNKS);
     let csize = nobs.div_ceil(nchunks).max(1);
-    let chunks = for_blocks(io, nchunks, threads, StoreMode::Serial, |c, _emit| {
+    let pt = threads_for_rows(threads, nobs);
+    let chunks = for_blocks(io, nchunks, pt, StoreMode::Parallel, |c, _emit| {
         let first = (c * csize).min(nobs);
         let last = ((c + 1) * csize).min(nobs);
-        let mut ch = Chunk { keys: vec_with_capacity(last - first)?, ..Chunk::default() };
+        let mut ch = Chunk::default();
+        let mut pairs: Vec<(u64, f64)> = Vec::new();
         if hasw {
-            ch.ws = vec_with_capacity(last - first)?;
+            pairs = vec_with_capacity(last - first)?;
+        } else {
+            ch.keys = vec_with_capacity(last - first)?;
         }
         for i in first..last {
             if let Some(w) = w {
@@ -222,13 +240,30 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
                 let k = key(x[i]);
                 ch.neg_zero |= k == NEG_ZERO;
                 ch.pos_zero |= k == POS_ZERO;
-                ch.keys.push(k);
                 if hasw {
-                    ch.ws.push(wi);
+                    ch.nonint_w |= wi.fract() != 0.0;
+                    pairs.push((k, wi));
+                } else {
+                    ch.keys.push(k);
                 }
             }
         }
-        if !hasw {
+        if hasw {
+            // Weights are positive, so their bits order them: a total order, whatever the
+            // observation order.
+            pairs.sort_unstable_by_key(|&(k, w)| (k, w.to_bits()));
+            ch.keys = vec_with_capacity(pairs.len())?;
+            ch.ws = vec_with_capacity(pairs.len())?;
+            ch.prefix = vec_with_capacity(pairs.len() + 1)?;
+            let mut s = 0.0;
+            ch.prefix.push(s);
+            for (k, w) in pairs {
+                ch.keys.push(k);
+                ch.ws.push(w);
+                s += w;
+                ch.prefix.push(s);
+            }
+        } else {
             ch.keys.sort_unstable();
         }
         Ok(ch)
@@ -250,11 +285,19 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
         return Err(Error::fallback("signed zero"));
     }
 
-    let qs = if hasw { weighted_pctiles(&chunks, &positions)? } else { unweighted_pctiles(&chunks, n, spec, &positions) };
+    let qs = if hasw {
+        weighted_pctiles(io, &chunks, n, spec, &positions, pt)?
+    } else {
+        unweighted_pctiles(io, &chunks, n, spec, &positions, pt)?
+    };
+    // -inf (or a value beyond `.`): _pctile returns `.`, which xtile.ado then treats as missing.
+    if qs.iter().any(|q| !(q.is_finite() && *q < miss)) {
+        return Err(Error::fallback("overflow"));
+    }
 
     match spec.kind {
         Kind::Xtile => {
-            let parts = for_blocks(io, nchunks, threads, StoreMode::Serial, |c, _emit| {
+            let parts = for_blocks(io, nchunks, pt, StoreMode::Parallel, |c, _emit| {
                 let first = (c * csize).min(nobs);
                 let last = ((c + 1) * csize).min(nobs);
                 let mut out = vec_with_capacity(last - first)?;
@@ -288,18 +331,84 @@ pub fn compute<I: Io>(io: &I, spec: &Spec, threads: usize) -> Res<Computed> {
     }
 }
 
-/// The r-th smallest key (1-based) across sorted chunks.
-fn kth(chunks: &[Chunk], r: usize) -> u64 {
-    let count_le = |v: u64| chunks.iter().map(|c| c.keys.partition_point(|&k| k <= v)).sum::<usize>();
-    let (mut lo, mut hi) = (0u64, u64::MAX);
-    while lo < hi {
-        let mid = lo + (hi - lo) / 2;
-        if count_le(mid) >= r { hi = mid } else { lo = mid + 1 }
-    }
-    lo
+/// Below this many keys left in its window, [`lowest`] tries them one by one.
+const SMALL: usize = 64;
+
+fn chunk_keys(chunks: &[Chunk]) -> Vec<&[u64]> {
+    chunks.iter().map(|c| c.keys.as_slice()).collect()
 }
 
-fn unweighted_pctiles(chunks: &[Chunk], n: usize, spec: &Spec, positions: &[Pos]) -> Vec<f64> {
+/// Sets `pos[c]` to the number of keys <= v in chunk c, searching only its window `a[c]..b[c]`.
+fn window_pos(keys: &[&[u64]], a: &[usize], b: &[usize], v: u64, pos: &mut [usize]) {
+    for c in 0..keys.len() {
+        pos[c] = a[c] + keys[c][a[c]..b[c]].partition_point(|&k| k <= v);
+    }
+}
+
+/// The smallest key v in the sorted chunks `keys` (at most [`MAX_CHUNKS`]) for which `pred(pos)`
+/// holds, where `pos[c]` is the number of keys <= v in chunk c; `pred` must be monotone (false,
+/// then true, as v grows). None when it holds for no key. Bisects the range of the keys in a
+/// window that shrinks around the answer in every chunk, then tries the last few keys in order.
+fn lowest(keys: &[&[u64]], pred: impl Fn(&[usize]) -> bool) -> Option<u64> {
+    let m = keys.len();
+    // The answer lies in keys[c][a[c]..b[c]]: pred fails below the window and holds at its top.
+    let (mut a, mut b, mut pos) = ([0usize; MAX_CHUNKS], [0usize; MAX_CHUNKS], [0usize; MAX_CHUNKS]);
+    for c in 0..m {
+        b[c] = keys[c].len();
+    }
+    if !pred(&b[..m]) {
+        return None;
+    }
+    loop {
+        let (mut lo, mut hi, mut width) = (u64::MAX, 0u64, 0usize);
+        for c in 0..m {
+            if a[c] < b[c] {
+                lo = lo.min(keys[c][a[c]]);
+                hi = hi.max(keys[c][b[c] - 1]);
+                width += b[c] - a[c];
+            }
+        }
+        if lo == hi {
+            return Some(lo);
+        }
+        if width <= SMALL {
+            let mut cand = [0u64; SMALL];
+            let mut k = 0;
+            for c in 0..m {
+                for &v in &keys[c][a[c]..b[c]] {
+                    cand[k] = v;
+                    k += 1;
+                }
+            }
+            let cand = &mut cand[..k];
+            cand.sort_unstable();
+            for &v in cand.iter() {
+                window_pos(keys, &a[..m], &b[..m], v, &mut pos[..m]);
+                if pred(&pos[..m]) {
+                    return Some(v);
+                }
+            }
+            // not reached: pred holds at the top of the window
+            return Some(hi);
+        }
+        let mid = lo + (hi - lo) / 2;
+        window_pos(keys, &a[..m], &b[..m], mid, &mut pos[..m]);
+        if pred(&pos[..m]) {
+            b = pos;
+        } else {
+            a = pos;
+        }
+    }
+}
+
+fn unweighted_pctiles<I: Io>(
+    io: &I,
+    chunks: &[Chunk],
+    n: usize,
+    spec: &Spec,
+    positions: &[Pos],
+    threads: usize,
+) -> Res<Vec<f64>> {
     let needs: Vec<Need> =
         positions.iter().map(|&p| if spec.altdef { need_altdef(n, p) } else { need_default(n, p) }).collect();
     let mut ranks: Vec<usize> = needs
@@ -311,34 +420,112 @@ fn unweighted_pctiles(chunks: &[Chunk], n: usize, spec: &Spec, positions: &[Pos]
         .collect();
     ranks.sort_unstable();
     ranks.dedup();
-    let vals: Vec<f64> = ranks.iter().map(|&r| unkey(kth(chunks, r))).collect();
+    let keys = chunk_keys(chunks);
+    // The r-th smallest key (1-based), r <= n.
+    let vals = for_blocks(io, ranks.len(), threads, StoreMode::Parallel, |j, _emit| {
+        let r = ranks[j];
+        Ok(unkey(lowest(&keys, |pos| pos.iter().sum::<usize>() >= r).unwrap_or(u64::MAX)))
+    })?;
     let at = |r: usize| vals[ranks.binary_search(&r).expect("rank was selected")];
-    needs.iter().map(|nd| nd.value(at)).collect()
+    Ok(needs.iter().map(|nd| nd.value(at)).collect())
 }
 
-fn weighted_pctiles(chunks: &[Chunk], positions: &[Pos]) -> Res<Vec<f64>> {
-    let n: usize = chunks.iter().map(|c| c.keys.len()).sum();
-    let mut pairs: Vec<(u64, f64)> = vec_with_capacity(n)?;
-    for c in chunks {
-        pairs.extend(c.keys.iter().copied().zip(c.ws.iter().copied()));
+fn weighted_pctiles<I: Io>(
+    io: &I,
+    chunks: &[Chunk],
+    n: usize,
+    spec: &Spec,
+    positions: &[Pos],
+    threads: usize,
+) -> Res<Vec<f64>> {
+    let w = Chunked::new(chunks, n);
+    // P = W*k/nq (k < nq) or W*p/100 (p < 100)
+    let top = if spec.kind == Kind::Plist { 100.0 } else { spec.nq as f64 };
+    if !(w.total * top).is_finite() {
+        return Err(Error::fallback("overflow"));
     }
-    // Stable: ties stay in observation order.
-    pairs.sort_by_key(|p| p.0);
-    let mut xs = vec_with_capacity(n)?;
-    let mut ws = vec_with_capacity(n)?;
-    for (k, w) in pairs {
-        xs.push(unkey(k));
-        ws.push(w);
+    let qs = for_blocks(io, positions.len(), threads, StoreMode::Parallel, |j, _emit| Ok(weighted_pctile(&w, positions[j])))?;
+    qs.into_iter().map(|q| q.ok_or_else(|| Error::fallback("weighted tolerance"))).collect()
+}
+
+/// The sorted weighted chunks as [`Runs`]: a run is a key, and its cumulative weight is the sum,
+/// in chunk order, of each chunk's running sum up to and including that key.
+struct Chunked<'a> {
+    chunks: &'a [Chunk],
+    keys: Vec<&'a [u64]>,
+    total: f64,
+    noise: f64,
+}
+
+impl<'a> Chunked<'a> {
+    fn new(chunks: &'a [Chunk], n: usize) -> Chunked<'a> {
+        let mut w = Chunked { chunks, keys: chunk_keys(chunks), total: 0.0, noise: 0.0 };
+        let mut ends = [0usize; MAX_CHUNKS];
+        for (e, k) in ends.iter_mut().zip(&w.keys) {
+            *e = k.len();
+        }
+        w.total = w.cum_at(&ends[..chunks.len()]);
+        w.noise = noise(!chunks.iter().any(|c| c.nonint_w), n, w.total);
+        w
     }
-    let t = Weighted::new(&xs, &ws);
-    positions.iter().map(|&p| t.pctile(p).ok_or_else(|| Error::fallback("weighted tolerance"))).collect()
+
+    /// The weight of the first `pos[c]` observations of every chunk c.
+    fn cum_at(&self, pos: &[usize]) -> f64 {
+        let mut s = 0.0;
+        for (c, &p) in self.chunks.iter().zip(pos) {
+            s += c.prefix[p];
+        }
+        s
+    }
+}
+
+impl Runs for Chunked<'_> {
+    type Run = u64;
+    fn total(&self) -> f64 {
+        self.total
+    }
+    fn noise(&self) -> f64 {
+        self.noise
+    }
+    fn first(&self, t: f64, strict: bool) -> Option<u64> {
+        lowest(&self.keys, |pos| {
+            let c = self.cum_at(pos);
+            if strict { c > t } else { c >= t }
+        })
+    }
+    fn cum(&self, k: u64) -> f64 {
+        let mut pos = [0usize; MAX_CHUNKS];
+        for (p, ks) in pos.iter_mut().zip(&self.keys) {
+            *p = ks.partition_point(|&v| v <= k);
+        }
+        self.cum_at(&pos[..self.keys.len()])
+    }
+    fn x(&self, k: u64) -> f64 {
+        unkey(k)
+    }
+    fn stats(&self, k: u64) -> (f64, f64, usize) {
+        let (mut wmin, mut wmax, mut len) = (f64::INFINITY, 0.0f64, 0);
+        for (c, ks) in self.chunks.iter().zip(&self.keys) {
+            let a = ks.partition_point(|&v| v < k);
+            let b = a + ks[a..].partition_point(|&v| v <= k);
+            for &w in &c.ws[a..b] {
+                wmin = wmin.min(w);
+                wmax = wmax.max(w);
+            }
+            len += b - a;
+        }
+        (wmin, wmax, len)
+    }
+    fn next(&self, k: u64) -> Option<u64> {
+        self.keys.iter().filter_map(|ks| ks.get(ks.partition_point(|&v| v <= k)).copied()).min()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::io::{MISS, MemIo};
-    use crate::quant::{pctile_altdef, pctile_altdef_nq, pctile_nq};
+    use crate::quant::{Weighted, pctile_altdef, pctile_altdef_nq, pctile_nq};
     use crate::testutil::{Rng, miss_a};
 
     struct Data {
@@ -391,12 +578,18 @@ mod tests {
         let ws: Vec<f64> = samp.iter().map(|p| p.1).collect();
         let qs: Vec<f64> = if d.w.is_some() {
             let t = Weighted::new(&xs, &ws);
+            if !(t.total() * s.nq as f64).is_finite() {
+                return Err("overflow");
+            }
             (1..s.nq).map(|k| t.pctile(Pos::Nq(k, s.nq))).collect::<Option<Vec<_>>>().ok_or("weighted tolerance")?
         } else if s.altdef {
             (1..s.nq).map(|k| pctile_altdef_nq(&xs, k, s.nq)).collect()
         } else {
             (1..s.nq).map(|k| pctile_nq(&xs, k, s.nq)).collect()
         };
+        if qs.iter().any(|q| !(q.is_finite() && *q < MISS)) {
+            return Err("overflow");
+        }
         match s.kind {
             Kind::Xtile => {
                 let col = (0..n)
@@ -596,6 +789,123 @@ mod tests {
             for kind in [Kind::Xtile, Kind::Pctile] {
                 let e = compute(&io, &spec(kind, 4, wtype, false, false), 3).err().expect("falls back");
                 assert!(e.is_fallback() && e.msg == crate::nan::REASON, "{wtype:?} {at_w}");
+            }
+        }
+    }
+
+    #[test]
+    fn lowest_finds_the_rth_key_across_chunks() {
+        let mut r = Rng::new(99);
+        for m in [1usize, 2, 5, 17, MAX_CHUNKS] {
+            for wide in [false, true] {
+                let chunks: Vec<Vec<u64>> = (0..m)
+                    .map(|_| {
+                        let len = (r.unif() * 200.0) as usize;
+                        let mut v: Vec<u64> = (0..len)
+                            .map(|_| if wide { r.next_u64() } else { (r.unif() * 30.0) as u64 + (1 << 63) })
+                            .collect();
+                        v.sort_unstable();
+                        v
+                    })
+                    .collect();
+                let keys: Vec<&[u64]> = chunks.iter().map(|c| c.as_slice()).collect();
+                let mut all: Vec<u64> = chunks.concat();
+                all.sort_unstable();
+                for rank in 1..=all.len() {
+                    assert_eq!(lowest(&keys, |p| p.iter().sum::<usize>() >= rank), Some(all[rank - 1]), "m={m} r={rank}");
+                }
+                assert_eq!(lowest(&keys, |p| p.iter().sum::<usize>() > all.len()), None);
+            }
+        }
+    }
+
+    /// Splits weighted data into sorted chunks as compute does.
+    fn chunked(xs: &[f64], ws: &[f64], m: usize) -> Vec<Chunk> {
+        let size = xs.len().div_ceil(m).max(1);
+        (0..m)
+            .map(|c| {
+                let lo = (c * size).min(xs.len());
+                let hi = ((c + 1) * size).min(xs.len());
+                let mut pairs: Vec<(u64, f64)> = (lo..hi).map(|i| (key(xs[i]), ws[i])).collect();
+                pairs.sort_unstable_by_key(|&(k, w)| (k, w.to_bits()));
+                let mut ch = Chunk::default();
+                ch.prefix.push(0.0);
+                for (k, w) in pairs {
+                    ch.keys.push(k);
+                    ch.ws.push(w);
+                    ch.nonint_w |= w.fract() != 0.0;
+                    ch.prefix.push(ch.prefix.last().unwrap() + w);
+                }
+                ch
+            })
+            .collect()
+    }
+
+    #[test]
+    fn chunked_weights_match_the_sequential_reference() {
+        let mut r = Rng::new(5);
+        for case in 0..400 {
+            let n = 1 + (r.unif() * 300.0) as usize;
+            let ints = case % 2 == 0;
+            let distinct = 2.0 + r.unif() * 40.0;
+            let xs: Vec<f64> = (0..n).map(|_| (r.unif() * distinct).floor()).collect();
+            let ws: Vec<f64> = (0..n).map(|_| if ints { (r.unif() * 4.0).floor() + 1.0 } else { r.unif() + 0.05 }).collect();
+            let mut sorted: Vec<(f64, f64)> = xs.iter().copied().zip(ws.iter().copied()).collect();
+            sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+            let (sx, sw): (Vec<f64>, Vec<f64>) = sorted.into_iter().unzip();
+            let reference = Weighted::new(&sx, &sw);
+            for m in [1, 3, 8] {
+                let chunks = chunked(&xs, &ws, m);
+                let w = Chunked::new(&chunks, n);
+                for nq in [2usize, 3, 4, 7, 10] {
+                    for k in 1..nq {
+                        let pos = Pos::Nq(k, nq);
+                        let (a, b) = (weighted_pctile(&w, pos), reference.pctile(pos));
+                        if ints {
+                            assert_eq!(a, b, "case {case} m={m} k={k} nq={nq}");
+                        } else if let (Some(a), Some(b)) = (a, b) {
+                            assert_eq!(a, b, "case {case} m={m} k={k} nq={nq}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_percentiles_and_weights_fall_back() {
+        let fb = |d: &Data, s: &Spec| compute(&memio(d), s, 2).map(|_| ()).unwrap_err().msg;
+        // The average of x(2) and x(3) below -8.988e307 is -inf.
+        let x = vec![-1.6e308, -1.61e308, -1.62e308, -1.63e308];
+        let d = Data { x: x.clone(), w: None, t: None };
+        assert_eq!(fb(&d, &spec(Kind::Pctile, 2, Wtype::None, false, false)), "overflow");
+        assert_eq!(fb(&d, &spec(Kind::Xtile, 2, Wtype::None, false, false)), "overflow");
+        // altdef interpolates, staying finite; nq(5) needs single order statistics only.
+        assert!(compute(&memio(&d), &spec(Kind::Pctile, 3, Wtype::None, true, false), 1).is_ok());
+        let c = compute(&memio(&d), &spec(Kind::Pctile, 5, Wtype::None, false, false), 1).unwrap();
+        assert_eq!(c.col[0], -1.63e308);
+        // Total weight times nq beyond the largest double.
+        let xs: Vec<f64> = (1..=4).map(f64::from).collect();
+        let d = Data { x: xs.clone(), w: Some(vec![8e307; 4]), t: None };
+        assert_eq!(fb(&d, &spec(Kind::Xtile, 4, Wtype::Aw, false, false)), "overflow");
+        let d = Data { x: xs, w: Some(vec![1e307; 4]), t: None };
+        let c = compute(&memio(&d), &spec(Kind::Pctile, 4, Wtype::Fw, false, false), 1).unwrap();
+        assert_eq!(&c.col[..3], &[1.5, 2.5, 3.5]);
+    }
+
+    #[test]
+    fn the_most_chunks_give_the_same_results_for_any_thread_count() {
+        let n = MAX_CHUNKS * MIN_CHUNK + 5;
+        for wt in [None, Some(Wtype::Fw)] {
+            let d = data(n, 77, true, wt, true);
+            let io = memio(&d);
+            for (kind, nq) in [(Kind::Xtile, 10), (Kind::Pctile, 100)] {
+                let s = spec(kind, nq, wt.unwrap_or(Wtype::None), false, true);
+                let (want, n0) = reference(&d, &s).expect("fast");
+                for threads in [1, 8] {
+                    let c = compute(&io, &s, threads).unwrap();
+                    assert!(same(&c.col, &want) && c.n0 == n0, "{s:?} threads={threads}");
+                }
             }
         }
     }
