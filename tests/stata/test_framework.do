@@ -381,10 +381,13 @@ di as txt "current directory profile.do ok"
 * ---------------------------------------------------------------------------------------------
 fastata on
 fastata off
+* the version this repository's files build
+_fx rtversion
+local fxver `fx_have'
 local pl0 : dir `"`rt'"' files "fastata_*.plugin"
 assert `: word count `pl0'' == 1
 local pl0 `pl0'
-mata: st_local("ok", strofreal(ustrregexm(st_local("pl0"), "^fastata_0[.]1[.]0_[0-9a-f]{8}[.]plugin$")))
+mata: st_local("ok", strofreal(ustrregexm(st_local("pl0"), "^fastata_" + subinstr(st_local("fxver"), ".", "[.]") + "_[0-9a-f]{8}[.]plugin$")))
 assert `ok'
 mata: tf_write(st_local("rt") + "fastata_runtime.txt", "0.0.9" + LF)
 copy `"`rt'`pl0'"' `"`rt'fastata_0.0.9.plugin"'
@@ -393,7 +396,7 @@ fx_out fastata status
 fx_has "built by version 0.0.9" status outdated
 fastata on
 _fx rtversion
-assert "`fx_have'" == "0.1.0" & "`fx_build'" == "0"
+assert "`fx_have'" == "`fxver'" & "`fx_build'" == "0"
 capture confirm file `"`rt'fastata_0.0.9.plugin"'
 assert _rc
 erase `"`rt'_fxo_00000000_egen.ado"'
@@ -467,7 +470,7 @@ di as txt "refresh ok"
 
 * a build waits while another process holds the build lock, and takes over a lock left by an
 * interrupted build after 10 seconds
-mata: tf_write(st_local("rt") + "fastata_runtime.txt", "0.1.0" + LF)
+mata: tf_write(st_local("rt") + "fastata_runtime.txt", st_local("fxver") + LF)
 mkdir `"`rt'fastata_build.lock"'
 fastata off
 timer clear 99
@@ -485,7 +488,7 @@ di as txt "build lock ok"
 * three sessions that start at once after an update all rebuild the runtime directory, one at a
 * time, and run the commands meanwhile
 if `unix' {
-	mata: tf_write(st_local("rt") + "fastata_runtime.txt", "0.1.0" + LF)
+	mata: tf_write(st_local("rt") + "fastata_runtime.txt", st_local("fxver") + LF)
 	mata: b = "quietly fastata on" \ "sysuse auto, clear" \ "egen m = mode(rep78)" \ "egen double t = mean(price), by(foreign)" \ "isid make" \ "_fx rtversion" \ ("assert " + char(96) + "fx_build" + char(39) + " == 0")
 	mata: tf_childdo("tf_build1", b); tf_childdo("tf_build2", b); tf_childdo("tf_build3", b)
 	fx_runchild tf_build1 tf_build2 tf_build3

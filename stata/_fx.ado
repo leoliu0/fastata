@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx: the fastata runtime. Mata functions defined in an ado-file are private to that file, so
 *! everything that needs the functions below goes through this program:
 *!     _fx <subcommand> <arguments>

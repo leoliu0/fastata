@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_xtile: fastata's xtile. Fast path: xtile newvar = exp [if] [in] [aw fw pw] [, nquantiles(#)
 *! altdef] with the weight a numeric variable and nquantiles() a plain integer up to 1001 (the
 *! plugin's quant command computes the percentiles and categories; see src/xtile.rs). Every

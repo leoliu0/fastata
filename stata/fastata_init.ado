@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! fastata_init: run at startup by the lines fastata enable writes into profile.do. Turns fastata
 *! on for the session, rebuilding the runtime directory first when the installed files changed;
 *! does nothing after fastata disable. Prints nothing; profile.do runs it under capture, so a

@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_call [varlist] [if] [in], <cmd> "key=value" ...: the only program that calls the fastata
 *! plugin (a plugin program defined in an ado-file is private to that file). Each key=value
 *! token must be quoted: Stata splits unquoted plugin arguments at = | ; * -.
@@ -16,7 +16,7 @@
 *! exits 1.
 program _fx_call
 	version 16
-	local fx_version 0.1.0
+	local fx_version 0.1.1
 	c_local fx_plugrc 0
 	c_local fx_errmsg
 	if c(N) > 2147483647 {
@@ -45,4 +45,4 @@ program _fx_call
 	c_local fx_plugrc `rc'
 end
 
-capture program _fx_plugin, plugin using("fastata_0.1.0.plugin")
+capture program _fx_plugin, plugin using("fastata_0.1.1.plugin")

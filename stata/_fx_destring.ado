@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_destring: fastata's destring. The fast path (caller 11 or later) converts every string
 *! variable in the plugin (src/strnum: the calibrated emulations of what destring.ado 2.4.4 does
 *! before and in real(), and of compress), then runs destring.ado's own commands and messages on

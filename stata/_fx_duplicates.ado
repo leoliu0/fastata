@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_duplicates: fastata's duplicates. Fast path: the subcommands report, examples, list, tag
 *! and drop with the original's syntax, whenever the original would not fail; examples and list
 *! only with list options that do not name variables (see ListOK below). The plugin groups the

@@ -1,9 +1,9 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_isid: fastata's isid. Fast path: isid varlist [, sort missok] (not the using form) when
 *! no string key value starts or ends with a blank or a non-ASCII byte. The plugin counts the
 *! observations with a missing key and the distinct key tuples; the two errors of the original
 *! (missing key, key not unique) are raised here with the original's messages. Everything else
-*! runs the original, right away below 150 observations (small data: there the original is
+*! runs the original, right away below 100 observations (small data: there the original is
 *! faster than fastata's fixed cost per call; see _fx gate).
 program _fx_isid
 	local caller : display _caller()

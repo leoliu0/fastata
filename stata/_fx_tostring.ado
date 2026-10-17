@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_tostring: fastata's tostring. The fast path formats every numeric variable in the plugin
 *! (src/strnum: integers within the calibrated digit bound of a %W.0g or %W.0f format, and
 *! missing codes, exactly as string() writes them), then runs tostring.ado's (3.0.0) own commands

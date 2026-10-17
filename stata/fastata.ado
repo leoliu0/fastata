@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! fastata: makes official Stata data commands fast without changing their syntax or results
 *! (egen, isid, duplicates, xtile, pctile, destring, tostring).
 *!   fastata enable | disable | on | off | status        (see help fastata)
@@ -10,7 +10,7 @@ program fastata
 		exit 9
 	}
 	version 16
-	local fx_version 0.1.0
+	local fx_version 0.1.1
 	gettoken sub 0 : 0, parse(" ,")
 	if `"`sub'"' == "" local sub status
 	if !inlist(`"`sub'"', "enable", "disable", "on", "off", "status") {

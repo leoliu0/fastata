@@ -1,4 +1,4 @@
-*! version 0.1.0  Leo Liu  15oct2026
+*! version 0.1.1  Leo Liu  17oct2026
 *! _fx_egen: fastata's egen, called by the egen shim with the by prefix forwarded. The fast path
 *! (Fast below) covers the 21 official functions listed in help fastata for the inputs it has
 *! been tested on; every other call, and every input it is not sure about, runs the original
