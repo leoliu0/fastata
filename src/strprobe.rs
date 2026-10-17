@@ -5,6 +5,10 @@
 //!
 //! Varlist: string variables (str# or strL). Key `threads` (0 = every logical CPU). Locals:
 //! `fx_chk` (the checksum, 16 hex digits) and `fx_n` (values read).
+//!
+//! Not in the shipped plugin (parallel string reads crashed Stata, see [`crate::io`]): it is built
+//! only with the cargo feature `probes`, in release mode (a debug build asserts that string reads
+//! stay on Stata's thread).
 
 use crate::args::Args;
 use crate::error::{Error, Res};
@@ -28,7 +32,7 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 /// combined in block order.
 pub fn checksum<I: Io>(io: &I, k: usize, threads: usize) -> Res<u64> {
     let n = io.nobs();
-    let blocks = for_blocks(io, n.div_ceil(BLOCK), threads, StoreMode::Serial, |b, _emit| {
+    let blocks = for_blocks(io, n.div_ceil(BLOCK), threads, StoreMode::Parallel, |b, _emit| {
         let first = b * BLOCK;
         let mut h = FNV_OFFSET;
         let mut buf = Vec::new();
@@ -68,6 +72,7 @@ mod tests {
         let n = 3 * BLOCK + 17;
         let mut rng = Rng::new(7);
         let mut io = MemIo::new(n);
+        io.any_thread = true;
         let a: Vec<Vec<u8>> = (0..n).map(|i| format!("s{}", (rng.unif() * 1e6) as u64 + i as u64).into_bytes()).collect();
         let b: Vec<Vec<u8>> = (0..n).map(|i| if i % 5 == 0 { Vec::new() } else { vec![b'x'; i % 40] }).collect();
         let ca = io.add_str(a.clone());
@@ -80,6 +85,7 @@ mod tests {
         }
         // one changed byte, or two values swapped across variables, change the checksum
         let mut io2 = MemIo::new(n);
+        io2.any_thread = true;
         let mut a2 = a.clone();
         a2[n - 1][0] = b't';
         let c2a = io2.add_str(a2);
@@ -88,6 +94,7 @@ mod tests {
         io2.push_var(c2b);
         assert_ne!(checksum(&io2, 2, 4).unwrap(), one);
         let mut io3 = MemIo::new(n);
+        io3.any_thread = true;
         let c3a = io3.add_str(b);
         let c3b = io3.add_str(a);
         io3.push_var(c3a);

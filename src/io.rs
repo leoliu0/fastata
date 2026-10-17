@@ -6,12 +6,15 @@
 //! method runs on the calling (Stata) thread only. String reads stay there because parallel
 //! ones are unsafe: `tests/stata/stress_strread.do` crashed StataNow 19.5 MP (Linux) with
 //! "double free or corruption" on its first 32-thread `strprobe` call over 2e7 str20/strL
-//! values. Serially, a str20 value takes 40 ns and a strL value 88 ns.
+//! values. Both implementations check it: [`SpiIo`] in debug builds, `MemIo` (unit tests)
+//! always.
 
-use std::ffi::{CString, c_char, c_int, c_uint, c_void};
+use std::ffi::{CStr, CString, c_char, c_int, c_uint, c_void};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Mutex, PoisonError};
+use std::thread::ThreadId;
 
-use crate::error::{Error, Res};
+use crate::error::{Error, Res, vec_with_capacity};
 
 /// Observations of one block: a contiguous range or an explicit (0-based) list.
 #[derive(Clone, Copy)]
@@ -56,12 +59,13 @@ pub trait Io: Sync {
     /// Writes `vals` (row-major as in `read_block`); non-finite values become missing (`.`);
     /// `skip[r * vars.len() + j] != 0` leaves that cell untouched.
     fn write_block(&self, vars: &[i32], rows: Rows<'_>, vals: &[f64], skip: Option<&[u8]>) -> Res<()>;
+    /// Calling (Stata) thread only.
     fn is_str(&self, var: i32) -> bool;
-    /// Appends the bytes of string variable `var` at `obs` to `out`. A binary strL value is a
-    /// fallback (`binary strL`).
+    /// Appends the bytes of string variable `var` at `obs` to `out`, growing it fallibly
+    /// (r(909)). A binary strL value is a fallback (`binary strL`). Calling (Stata) thread only.
     fn read_str(&self, var: i32, obs: usize, out: &mut Vec<u8>) -> Res<()>;
-    /// Stores `s` (no NUL bytes) into string variable `var` at `obs`.
-    fn write_str(&self, var: i32, obs: usize, s: &[u8]) -> Res<()>;
+    /// Stores `s` into string variable `var` at `obs`. Calling (Stata) thread only.
+    fn write_str(&self, var: i32, obs: usize, s: &CStr) -> Res<()>;
 }
 
 unsafe extern "C" {
@@ -134,16 +138,64 @@ pub fn error(s: &str) {
     unsafe { fx_error(c.as_ptr()) };
 }
 
+/// Fallback reason for a dataset larger than the SPI's `int` observation count.
+pub const TOO_MANY_OBS: &str = "over 2147483647 observations";
+
+/// Storage kinds cached per variable by [`SpiIo`]; 0 = not looked up yet.
+const KIND_NUM: u8 = 1;
+const KIND_STR: u8 = 2;
+const KIND_STRL: u8 = 3;
+
 /// Stata's dataset, through the SPI.
 pub struct SpiIo {
     nobs: usize,
     nvars: usize,
     missval: f64,
+    /// The storage kind of each varlist position, looked up on first use.
+    kinds: Vec<AtomicU8>,
+    /// Stata's thread (the one that created this handle), for the string-call checks.
+    owner: ThreadId,
 }
 
 impl SpiIo {
-    pub fn new() -> SpiIo {
-        unsafe { SpiIo { nobs: fx_nobs().max(0) as usize, nvars: fx_nvars().max(0) as usize, missval: fx_missval() } }
+    /// The dataset of the current `plugin call`. SPI 3.0 counts observations in a C `int`, so a
+    /// negative count means more than 2^31-1 observations: the fallback [`TOO_MANY_OBS`]. (Counts
+    /// of 2^32 and more wrap to small positive numbers; `_fx_call.ado` falls back before the
+    /// plugin is called for those.)
+    pub fn new() -> Res<SpiIo> {
+        let (nobs, nvars, missval) = unsafe { (fx_nobs(), fx_nvars(), fx_missval()) };
+        if nobs < 0 {
+            return Err(Error::fallback(TOO_MANY_OBS));
+        }
+        let nvars = nvars.max(0) as usize;
+        let mut kinds = vec_with_capacity(nvars)?;
+        kinds.extend((0..nvars).map(|_| AtomicU8::new(0)));
+        Ok(SpiIo { nobs: nobs as usize, nvars, missval, kinds, owner: std::thread::current().id() })
+    }
+
+    fn check_thread(&self) {
+        debug_assert_eq!(std::thread::current().id(), self.owner, "fastata: a string SPI call off Stata's thread");
+    }
+
+    fn kind(&self, var: i32) -> u8 {
+        let lookup = || unsafe {
+            if fx_is_str(var) == 0 {
+                KIND_NUM
+            } else if fx_is_strl(var) != 0 {
+                KIND_STRL
+            } else {
+                KIND_STR
+            }
+        };
+        let Some(slot) = usize::try_from(var - 1).ok().and_then(|i| self.kinds.get(i)) else { return lookup() };
+        match slot.load(Ordering::Relaxed) {
+            0 => {
+                let k = lookup();
+                slot.store(k, Ordering::Relaxed);
+                k
+            }
+            k => k,
+        }
     }
 }
 
@@ -186,38 +238,49 @@ impl Io for SpiIo {
     }
 
     fn is_str(&self, var: i32) -> bool {
-        unsafe { fx_is_str(var) != 0 }
+        self.check_thread();
+        self.kind(var) != KIND_NUM
     }
 
     fn read_str(&self, var: i32, obs: usize, out: &mut Vec<u8>) -> Res<()> {
+        self.check_thread();
         let o = obs as c_int + 1;
-        if unsafe { fx_is_strl(var) } != 0 {
+        let start = out.len();
+        if self.kind(var) == KIND_STRL {
             let len = unsafe { fx_strl_len(var, o) };
             if len < 0 {
                 return Err(Error::fallback("binary strL"));
             }
             let len = len as usize;
-            let mut buf = vec![0u8; len + 1];
-            let rc = unsafe { fx_read_strl(var, o, buf.as_mut_ptr().cast(), (len + 1) as c_int) };
+            out.try_reserve(len + 1).map_err(|_| Error::oom())?;
+            out.resize(start + len + 1, 0);
+            let rc = unsafe { fx_read_strl(var, o, out[start..].as_mut_ptr().cast(), (len + 1) as c_int) };
             if rc < 0 {
+                out.truncate(start);
                 return Err(Error::spi(-rc, "reading a strL variable"));
             }
-            let end = buf[..len].iter().position(|&b| b == 0).unwrap_or(len);
-            out.extend_from_slice(&buf[..end]);
+            let end = out[start..start + len].iter().position(|&b| b == 0).unwrap_or(len);
+            out.truncate(start + end);
         } else {
-            let mut buf = [0u8; STR_BUF];
-            let len = unsafe { fx_read_str(var, o, buf.as_mut_ptr().cast()) };
+            // straight into the spare capacity: nothing is zeroed or copied
+            out.try_reserve(STR_BUF).map_err(|_| Error::oom())?;
+            let len = unsafe { fx_read_str(var, o, out.as_mut_ptr().add(start).cast()) };
             if len < 0 {
                 return Err(Error::spi(-len, "reading a string variable"));
             }
-            out.extend_from_slice(&buf[..len as usize]);
+            let len = len as usize;
+            if len >= STR_BUF {
+                return Err(Error::new(9999, "fastata: internal error (str# value too long); please report it"));
+            }
+            // SAFETY: fx_read_str wrote len bytes (plus a NUL) into the reserved capacity
+            unsafe { out.set_len(start + len) };
         }
         Ok(())
     }
 
-    fn write_str(&self, var: i32, obs: usize, s: &[u8]) -> Res<()> {
-        let c = CString::new(s).map_err(|_| Error::syntax("fastata plugin: string value with a NUL byte"))?;
-        let rc = unsafe { fx_write_str(var, obs as c_int + 1, c.as_ptr()) };
+    fn write_str(&self, var: i32, obs: usize, s: &CStr) -> Res<()> {
+        self.check_thread();
+        let rc = unsafe { fx_write_str(var, obs as c_int + 1, s.as_ptr()) };
         if rc != 0 { Err(Error::spi(rc, "storing a string variable")) } else { Ok(()) }
     }
 }
@@ -227,12 +290,14 @@ pub use mem::MemIo;
 
 #[cfg(test)]
 mod mem {
+    use std::ffi::CStr;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::thread::ThreadId;
 
     use parking_lot::RwLock;
 
     use super::{Io, Rows};
-    use crate::error::Res;
+    use crate::error::{Error, Res};
 
     /// Stata's system missing value (2^1023).
     pub const MISS: f64 = 8.98846567431158e307;
@@ -244,15 +309,23 @@ mod mem {
 
     /// An in-memory dataset: columns plus a varlist mapping positions (1-based) to columns, so
     /// one column may appear at several positions (aliasing, as in Stata).
+    /// String calls must come from the thread that created it (Stata's thread), unless
+    /// `any_thread` is set (the parallel-read probe).
     pub struct MemIo {
         pub cols: Vec<Col>,
         pub varlist: Vec<usize>,
         pub n: usize,
+        pub any_thread: bool,
+        owner: ThreadId,
     }
 
     impl MemIo {
         pub fn new(n: usize) -> MemIo {
-            MemIo { cols: Vec::new(), varlist: Vec::new(), n }
+            MemIo { cols: Vec::new(), varlist: Vec::new(), n, any_thread: false, owner: std::thread::current().id() }
+        }
+
+        fn check_thread(&self) {
+            assert!(self.any_thread || std::thread::current().id() == self.owner, "a string call off the creating thread");
         }
 
         /// Adds a numeric column; returns its column index.
@@ -344,17 +417,21 @@ mod mem {
         }
 
         fn is_str(&self, var: i32) -> bool {
+            self.check_thread();
             matches!(self.cols[self.varlist[var as usize - 1]], Col::Str(_))
         }
 
         fn read_str(&self, var: i32, obs: usize, out: &mut Vec<u8>) -> Res<()> {
-            out.extend_from_slice(&self.strs(var).read()[obs]);
+            self.check_thread();
+            let v = &self.strs(var).read()[obs];
+            out.try_reserve(v.len()).map_err(|_| Error::oom())?;
+            out.extend_from_slice(v);
             Ok(())
         }
 
-        fn write_str(&self, var: i32, obs: usize, s: &[u8]) -> Res<()> {
-            assert!(!s.contains(&0), "NUL byte in a string value");
-            self.strs(var).write()[obs] = s.to_vec();
+        fn write_str(&self, var: i32, obs: usize, s: &CStr) -> Res<()> {
+            self.check_thread();
+            self.strs(var).write()[obs] = s.to_bytes().to_vec();
             Ok(())
         }
     }
@@ -362,3 +439,35 @@ mod mem {
 
 #[cfg(test)]
 pub use mem::MISS;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn strs() -> MemIo {
+        let mut io = MemIo::new(3);
+        let c = io.add_str(vec![b"a".to_vec(), Vec::new(), b"ccc".to_vec()]);
+        io.push_var(c);
+        io
+    }
+
+    #[test]
+    fn string_reads_append() {
+        let io = strs();
+        let mut out = b"x".to_vec();
+        for obs in 0..3 {
+            io.read_str(1, obs, &mut out).unwrap();
+        }
+        assert_eq!(out, b"xaccc");
+    }
+
+    #[test]
+    #[should_panic(expected = "a string call off the creating thread")]
+    fn string_calls_off_the_creating_thread_are_caught() {
+        let io = strs();
+        std::thread::scope(|s| {
+            let r = s.spawn(|| io.read_str(1, 0, &mut Vec::new())).join();
+            r.unwrap_or_else(|p| std::panic::resume_unwind(p)).unwrap();
+        });
+    }
+}

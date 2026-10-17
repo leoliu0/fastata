@@ -7,7 +7,7 @@
 use crate::args::Args;
 use crate::error::{Error, Res, vec_filled};
 use crate::io::{Io, Rows};
-use crate::par::{OwnedRows, StoreMode, WriteJob, for_blocks};
+use crate::par::{StoreMode, WriteJob, for_blocks};
 
 const BLOCK: usize = 8192;
 
@@ -35,7 +35,7 @@ pub fn run<I: Io>(io: &I, a: &Args) -> Res<()> {
         for v in &mut vals {
             *v = if *v >= miss { f64::NAN } else { sign * *v };
         }
-        emit(WriteJob { vars: dst.clone(), rows: OwnedRows::Range { first, n: m }, vals, skip: None })
+        emit(WriteJob { vars: dst.clone(), rows: first..first + m, vals, skip: None })
     })?;
     Ok(())
 }

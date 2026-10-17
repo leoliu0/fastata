@@ -12,6 +12,7 @@ program _fx_tostring
 		local fx_why
 		* the original's parsing and error checks; any error runs the original, which reports it
 		capture version `caller': Parse `0'
+		if _rc == 1 exit 1
 		if _rc local fx_why error
 		if "`fx_why'" == "" & _N == 0 local fx_why "no observations"
 		if "`fx_why'" == "" {
@@ -25,13 +26,17 @@ program _fx_tostring
 				local convvars `convvars' `v'
 			}
 			if "`convvars'" != "" {
-				_fx threads
+				local fx_threads = cond(c(MP), c(processors), 0)
 				_fx_call `convvars', tostring "phase=compute" "threads=`fx_threads'" "fmt=`fmtkind'" "width=`fmtwidth'"
 				if `"`fx_fallback'"' != "" local fx_why `"`fx_fallback'"'
 				else if `fx_plugrc' local fx_why "plugin r(`fx_plugrc')"
 			}
 		}
 		if "`fx_why'" == "" {
+			* c(rc) as tostring.ado leaves it: its last capture is "capture confirm string
+			* variable" on the last variable (0 for a string variable, 7 for a numeric one)
+			capture confirm string variable `: word `: word count `varlist'' of `varlist''
+			local fx_lastrc = _rc
 			* the new variables, in one store: under their final names for generate, under
 			* temporary names for replace
 			local spec
@@ -45,57 +50,61 @@ program _fx_tostring
 				else tempvar new`i'
 				local spec `spec' str`fx_len_`j'' `new`i''
 			}
-			if "`spec'" != "" _fx store `fx_token' `spec'
+			* the store and everything tostring.ado does to the new variables, as one step: a
+			* Break cannot leave variables without their labels, characteristics or position
+			nobreak {
+				if "`spec'" != "" _fx store `fx_token' `spec'
 
-			* tostring.ado lines 71-160, with the stored variables in place of its temporary ones
-			if "`generate'" != "" {
-				tokenize `generate'
-				local i = 0
-				foreach v of local varlist {
-					local ++i
-					capture confirm string variable `v'
-					if _rc == 0 {
-						di as txt "`v' already string; no " ///
-							as res "generate"
-					}
-					else {
-				di as txt "``i'' generated as {res:`: type ``i'''}"
-						_crcslbl ``i'' `v'
-						move ``i'' `v'
-						move `v' ``i''
-						Charcopy `v' ``i''
-						char ``i''[tostring] ///
-						"converted to string"
+				* tostring.ado lines 71-160, with the stored variables in place of its temporary ones
+				if "`generate'" != "" {
+					tokenize `generate'
+					local i = 0
+					foreach v of local varlist {
+						local ++i
+						capture confirm string variable `v'
+						if _rc == 0 {
+							di as txt "`v' already string; no " ///
+								as res "generate"
+						}
+						else {
+					di as txt "``i'' generated as {res:`: type ``i'''}"
+							_crcslbl ``i'' `v'
+							move ``i'' `v'
+							move `v' ``i''
+							Charcopy `v' ``i''
+							char ``i''[tostring] ///
+							"converted to string"
+						}
 					}
 				}
-			}
-			else {
-				local i 0
-				foreach v of local varlist {
-					local ++i
-					capture confirm string variable `v'
-					if _rc == 0 {
-						di as txt "`v' already string; no " ///
+				else {
+					local i 0
+					foreach v of local varlist {
+						local ++i
+						capture confirm string variable `v'
+						if _rc == 0 {
+							di as txt "`v' already string; no " ///
+								as res "replace"
+						}
+						else if `"`: value label `v''"' != "" & "`force'" == "" {
+							di as txt "`v' has value label; no " ///
 							as res "replace"
-					}
-					else if `"`: value label `v''"' != "" & "`force'" == "" {
-						di as txt "`v' has value label; no " ///
-						as res "replace"
-					}
-					else {
-						local temp `new`i''
-						local oldtype : type `v'
-						char rename `v' `temp'
-						move `temp' `v'
-						local vl: variable label `v'
-						drop `v'
-						* under tostring.ado's version, where rename does not switch an SMCL
-						* log to {res} as it does under version 12 and later
-						version 8: rename `temp' `v'
-						label variable `v' `"`vl'"'
-		di as txt "`v' was {res:`oldtype'} now {res:`: type `v''}"
-						char `v'[tostring] ///
-						"converted to string"
+						}
+						else {
+							local temp `new`i''
+							local oldtype : type `v'
+							char rename `v' `temp'
+							move `temp' `v'
+							local vl: variable label `v'
+							drop `v'
+							* under tostring.ado's version, where rename does not switch an SMCL
+							* log to {res} as it does under version 12 and later
+							version 8: rename `temp' `v'
+							label variable `v' `"`vl'"'
+			di as txt "`v' was {res:`oldtype'} now {res:`: type `v''}"
+							char `v'[tostring] ///
+							"converted to string"
+						}
 					}
 				}
 			}
@@ -105,6 +114,7 @@ program _fx_tostring
 				_fx verify tostring `caller' `rc0' 0 "" "" "" 0 "" `"`0'"'
 				if `fx_vrc' exit `fx_vrc'
 			}
+			capture error `fx_lastrc'
 			exit
 		}
 	}

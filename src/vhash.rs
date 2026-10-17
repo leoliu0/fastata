@@ -19,7 +19,7 @@
 use crate::args::Args;
 use crate::error::{Res, vec_filled, vec_with_capacity};
 use crate::io::{self, Io, Rows};
-use crate::par::{StoreMode, for_blocks};
+use crate::par::{StoreMode, for_blocks, threads_for_rows};
 
 /// Values read per work item: a block of observations by every numeric variable. Stata stores
 /// the data observation by observation, so reading whole rows walks memory in order; a block of
@@ -65,7 +65,7 @@ pub fn hashes<I: Io>(io: &I, threads: usize) -> Res<Vec<Option<Hash>>> {
     let num: Vec<i32> = (1..=k as i32).filter(|&v| !io.is_str(v)).collect();
     let rows = block_rows(num.len());
     let nb = if num.is_empty() { 0 } else { n.div_ceil(rows).max(1) };
-    let blocks = for_blocks(io, nb, threads, StoreMode::Parallel, |b, _emit| {
+    let blocks = for_blocks(io, nb, threads_for_rows(threads, n.saturating_mul(num.len())), StoreMode::Parallel, |b, _emit| {
         let first = b * rows;
         num_block(io, &num, first, rows.min(n - first.min(n)))
     })?;

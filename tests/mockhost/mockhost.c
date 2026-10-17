@@ -2,7 +2,8 @@
     mockhost.c -- a fake Stata host for ABI tests of the fastata plugin on every OS.
 
     Implements the SPI 3.0 ST_plugin table over an in-memory 20,000-observation dataset (numeric
-    variables plus string variables that support both reads and stores), loads the plugin with
+    variables, str# variables that support both reads and stores, and a read-only strL variable),
+    loads the plugin with
     dlopen/LoadLibrary and runs its commands. Expected values come from naive references in this
     file.
 
@@ -48,6 +49,7 @@ enum {
     V_SNUM, /* string, read-only: numbers as text, every 50th junk ("NA", "-", "1e3x") */
     V_SOUT, /* string, written by the plugin; prefilled with "?" */
     V_SOUT2,
+    V_SL,   /* strL, read-only: numbers as text; every 7th padded with spaces to over 2046 bytes */
     NVAR
 };
 
@@ -56,7 +58,10 @@ enum {
 static double num[NVAR][NOBS];
 static char str[NVAR][NOBS][STRW];
 
-static int is_strvar(int v) { return v == V_SKEY || v == V_SNUM || v == V_SOUT || v == V_SOUT2; }
+static char *strl[NOBS];
+#define STRL_PAD 2100
+
+static int is_strvar(int v) { return v == V_SKEY || v == V_SNUM || v == V_SOUT || v == V_SOUT2 || v == V_SL; }
 
 static double unif(uint64_t i, uint64_t k) {
     uint64_t z = i * 0x9e3779b97f4a7c15ULL + k * 0xbf58476d1ce4e5b9ULL;
@@ -92,6 +97,10 @@ static void make_data(void) {
         snprintf(str[V_SKEY][i], STRW, "k%02d", (int)((i * 7919u + i / 3u) % 37u));
         if (i % 50 == 7) strcpy(str[V_SNUM][i], i % 150 == 7 ? "NA" : i % 150 == 57 ? "-" : "1e3x");
         else snprintf(str[V_SNUM][i], STRW, "%.2f", 2000.0 * unif(i, 6) - 1000.0);
+        int pad = i % 7 == 0 ? STRL_PAD : 0;
+        strl[i] = malloc(2 * pad + 32);
+        if (!strl[i]) { fprintf(stderr, "out of memory\n"); exit(2); }
+        snprintf(strl[i], 2 * pad + 32, "%*s%d%*s", pad, "", i * 3 - 7000, pad, "");
     }
     reset_outputs();
 }
@@ -142,7 +151,7 @@ static ST_int m_store(ST_int i, ST_int j, ST_double v) {
     return 0;
 }
 static ST_int m_sdata(ST_int i, ST_int j, char *s) {
-    if (!pos_ok(i, j) || !is_strvar(varlist[i - 1])) return 198;
+    if (!pos_ok(i, j) || !is_strvar(varlist[i - 1]) || varlist[i - 1] == V_SL) return 198;
     strcpy(s, str[varlist[i - 1]][j - 1]);
     return 0;
 }
@@ -152,16 +161,26 @@ static ST_int m_sstore(ST_int i, ST_int j, char *s) {
     return 0;
 }
 static ST_boolean m_isstr(ST_int i) { return i >= 1 && i <= nvarlist && is_strvar(varlist[i - 1]); }
-static ST_boolean m_isstrl(ST_int i) { (void)i; return 0; }
+static ST_boolean m_isstrl(ST_int i) { return i >= 1 && i <= nvarlist && varlist[i - 1] == V_SL; }
 static ST_boolean m_isbinary(ST_int i, ST_int j) { (void)i; (void)j; return 0; }
 static ST_int m_sdatalen(ST_int i, ST_int j) {
-    return pos_ok(i, j) && is_strvar(varlist[i - 1]) ? (ST_int)strlen(str[varlist[i - 1]][j - 1]) : -198;
+    if (!pos_ok(i, j) || !is_strvar(varlist[i - 1])) return -198;
+    return (ST_int)strlen(varlist[i - 1] == V_SL ? strl[j - 1] : str[varlist[i - 1]][j - 1]);
 }
-static ST_int m_strldata(ST_int i, ST_int j, char *s, ST_int len) { (void)i; (void)j; (void)s; (void)len; return -198; }
+/* Copies at most len bytes of the strL value (with its NUL when it fits); returns the bytes copied. */
+static ST_int m_strldata(ST_int i, ST_int j, char *s, ST_int len) {
+    if (!pos_ok(i, j) || varlist[i - 1] != V_SL || len < 0) return -198;
+    ST_int n = (ST_int)strlen(strl[j - 1]) + 1;
+    if (n > len) n = len;
+    memcpy(s, strl[j - 1], (size_t)n);
+    return n;
+}
 static ST_boolean m_selobs(ST_int j) { return j >= 1 && j <= NOBS; }
 static ST_int m_nobs1(void) { return 1; }
 static ST_int m_nobs2(void) { return NOBS; }
-static ST_int m_nobs(void) { return NOBS; }
+/* what SF_nobs() returns: NOBS, or a negative count (Stata's int for over 2^31-1 observations) */
+static ST_int nobs_reported = NOBS;
+static ST_int m_nobs(void) { return nobs_reported; }
 static ST_int m_nvar(void) { return NVAR; }
 static ST_int m_nvars(void) { return nvarlist; }
 static ST_boolean m_ismissing(ST_double z) { return z >= MISSVAL; }
@@ -397,6 +416,46 @@ static void test_stale_token(void) {
     pass("stale token gives r(9999)");
 }
 
+/* strL values (some longer than the 2046-byte str# buffer) through destring's string reads. */
+static void test_strl_reads(void) {
+    const char *what = "strL reads (destring of a strL variable)";
+    reset_outputs();
+    const char *args[] = {"destring", "phase=compute", "threads=3", "force=0", "ign=", NULL};
+    int vars[] = {V_SL, -1};
+    int outs[] = {V_O3, -1};
+    char fb[256];
+    int rc = two_phase(vars, args, outs, "3", fb, sizeof fb);
+    if (rc || *fb) { fail(what, *fb ? fb : last_err); return; }
+    for (int i = 0; i < NOBS; i++) want[i] = (double)(i * 3 - 7000);
+    if (same(what, V_O3, want)) pass(what);
+}
+
+/* SF_nobs() is a C int: a negative count means more than 2^31-1 observations. Compute phases
+   fall back, store fails, version still answers. */
+static void test_too_many_obs(void) {
+    const char *what = "negative SF_nobs()";
+    nobs_reported = -100;
+    const char *cargs[] = {"cachetest", "nnum=1", NULL};
+    int vars[] = {V_X1, -1};
+    int rc1 = call(vars, cargs);
+    const char *fb = macro_get("_fx_fallback");
+    int fb_ok = fb && !strcmp(fb, "over 2147483647 observations") && !macro_get("_fx_token");
+    const char *sargs[] = {"store", "token=1", NULL};
+    int rc2 = call(vars, sargs);
+    const char *vargs[] = {"version", NULL};
+    int none[] = {-1};
+    int rc3 = call(none, vargs);
+    int ver_ok = macro_get("_fx_plugver") != NULL;
+    nobs_reported = NOBS;
+    if (rc1 || !fb_ok || rc2 != 9999 || rc3 || !ver_ok) {
+        char why[300];
+        snprintf(why, sizeof why, "compute rc %d fallback \"%s\", store rc %d, version rc %d", rc1, fb ? fb : "(unset)", rc2, rc3);
+        fail(what, why);
+        return;
+    }
+    pass(what);
+}
+
 /* ---------------------------------------------------------------- per-command cases */
 
 #include "mock_egen.c"
@@ -420,6 +479,8 @@ int main(int argc, char **argv) {
     tests_dup();
     tests_quant();
     tests_strnum();
+    test_strl_reads();
+    test_too_many_obs();
     test_bad_argument();
     test_unknown_command();
     printf("%s: %d failed\n", fails ? "MOCKHOST FAILED" : "MOCKHOST PASSED", fails);

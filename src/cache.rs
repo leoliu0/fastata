@@ -14,17 +14,22 @@
 //! `nnum` (how many are numeric) and `threads`. A compute phase that caches the negated numbers
 //! (missing codes unchanged) and the strings with "!" appended, and sets local `fx_token`.
 
+use std::ffi::CStr;
 use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::args::Args;
-use crate::error::{Error, Res, vec_filled};
+use crate::error::{Error, Res, vec_filled, vec_with_capacity, vec_zeroed};
 use crate::io::{self, Io, Rows};
-use crate::par::{OwnedRows, StoreMode, WriteJob, for_blocks};
+use crate::par::{StoreMode, WriteJob, for_blocks, for_chunks, threads_for_rows};
 
 const BLOCK: usize = 8192;
+
+/// Values per work item of [`read_cols`]: a block of rows by every variable (Stata stores the
+/// data row by row, so whole rows are read in memory order).
+const READ_VALUES: usize = 1 << 18;
 
 /// Output values of one compute phase, one entry per observation of the dataset.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -34,8 +39,65 @@ pub struct Output {
     /// The variable's storage type rounds them (float) or must hold them exactly (byte, int,
     /// long): the compute phase checks that before the ado chooses the type.
     pub nums: Vec<Vec<f64>>,
-    /// String outputs, one column per output variable (no NUL bytes).
-    pub strs: Vec<Vec<Vec<u8>>>,
+    /// String outputs, one column per output variable.
+    pub strs: Vec<StrCol>,
+}
+
+/// A string column: its values in observation order, each followed by a NUL byte, in a few
+/// large chunks (no allocation per value; `store` hands each value to Stata in place).
+#[derive(Debug, Default, Clone)]
+pub struct StrCol {
+    chunks: Vec<Vec<u8>>,
+    len: usize,
+}
+
+impl StrCol {
+    /// The column made of `chunks`, each a run of NUL-terminated values, `len` values in all.
+    pub fn from_chunks(chunks: Vec<Vec<u8>>, len: usize) -> StrCol {
+        debug_assert_eq!(chunks.iter().map(|c| c.iter().filter(|&&b| b == 0).count()).sum::<usize>(), len);
+        debug_assert!(chunks.iter().all(|c| c.last().is_none_or(|&b| b == 0)));
+        StrCol { chunks, len }
+    }
+
+    /// Appends `s` (no NUL byte), growing the last chunk fallibly (r(909)).
+    pub fn push(&mut self, s: &[u8]) -> Res<()> {
+        if s.contains(&0) {
+            return Err(Error::syntax("fastata plugin: string value with a NUL byte"));
+        }
+        if self.chunks.is_empty() {
+            self.chunks.try_reserve(1).map_err(|_| Error::oom())?;
+            self.chunks.push(Vec::new());
+        }
+        let c = self.chunks.last_mut().expect("a chunk");
+        c.try_reserve(s.len() + 1).map_err(|_| Error::oom())?;
+        c.extend_from_slice(s);
+        c.push(0);
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Number of values.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The values in observation order.
+    pub fn iter(&self) -> impl Iterator<Item = &CStr> {
+        self.chunks.iter().flat_map(|c| {
+            let mut rest = &c[..];
+            std::iter::from_fn(move || {
+                let s = CStr::from_bytes_until_nul(rest).ok()?;
+                rest = &rest[s.to_bytes_with_nul().len()..];
+                Some(s)
+            })
+        })
+    }
+}
+
+impl PartialEq for StrCol {
+    fn eq(&self, o: &StrCol) -> bool {
+        self.len == o.len && self.iter().eq(o.iter())
+    }
 }
 
 struct Entry {
@@ -92,14 +154,16 @@ pub fn cachetest<I: Io>(io: &I, a: &Args) -> Res<()> {
             *v = -*v;
         }
     }
-    let mut strs = Vec::new();
+    let mut strs = vec_with_capacity(io.nvars() - k)?;
+    let mut s = Vec::new();
     for v in k as i32 + 1..=io.nvars() as i32 {
-        let mut col = Vec::new();
+        let mut col = StrCol::default();
         for obs in 0..io.nobs() {
-            let mut s = Vec::new();
+            s.clear();
             io.read_str(v, obs, &mut s)?;
+            s.try_reserve(1).map_err(|_| Error::oom())?;
             s.push(b'!');
-            col.push(s);
+            col.push(&s)?;
         }
         strs.push(col);
     }
@@ -127,18 +191,26 @@ pub fn write<I: Io>(io: &I, out: &Output, threads: usize) -> Res<()> {
             return Err(Error::syntax("fastata plugin: store expects a string variable"));
         }
     }
-    if k > 0 {
+    if k > 0 && n > 0 {
         let vars: Vec<i32> = (1..=k as i32).collect();
-        for_blocks(io, n.div_ceil(BLOCK), threads, StoreMode::from_serial(None), |b, emit| {
+        let mode = StoreMode::from_serial(None);
+        for_blocks(io, n.div_ceil(BLOCK), threads_for_rows(threads, n * k), mode, |b, emit| {
             let first = b * BLOCK;
             let m = BLOCK.min(n - first);
+            let rows = Rows::Range { first, n: m };
+            if k == 1 && mode == StoreMode::Parallel {
+                return io.write_block(&vars, rows, &out.nums[0][first..first + m], None);
+            }
             let mut vals = vec_filled(m * k, 0.0)?;
             for (j, col) in out.nums.iter().enumerate() {
                 for (r, v) in col[first..first + m].iter().enumerate() {
                     vals[r * k + j] = *v;
                 }
             }
-            emit(WriteJob { vars: vars.clone(), rows: OwnedRows::Range { first, n: m }, vals, skip: None })
+            if mode == StoreMode::Parallel {
+                return io.write_block(&vars, rows, &vals, None);
+            }
+            emit(WriteJob { vars: vars.clone(), rows: first..first + m, vals, skip: None })
         })?;
     }
     for (j, col) in out.strs.iter().enumerate() {
@@ -151,33 +223,38 @@ pub fn write<I: Io>(io: &I, out: &Output, threads: usize) -> Res<()> {
 }
 
 /// Reads numeric varlist positions `vars` for every observation, column-major: one vector per
-/// variable. Missing values keep their raw codes. Runs in parallel blocks.
+/// variable. Missing values keep their raw codes. Runs in parallel blocks that read straight
+/// into the columns (one variable) or through a small row-major buffer per block, so the peak
+/// is the columns themselves.
 pub fn read_cols<I: Io>(io: &I, vars: &[i32], threads: usize) -> Res<Vec<Vec<f64>>> {
     let n = io.nobs();
     let k = vars.len();
-    let mut cols: Vec<Vec<f64>> = Vec::new();
+    let mut cols: Vec<Vec<f64>> = vec_with_capacity(k)?;
     for _ in 0..k {
-        cols.push(vec_filled(n, 0.0)?);
+        cols.push(vec_zeroed(n)?);
     }
     if k == 0 || n == 0 {
         return Ok(cols);
     }
-    let blocks = for_blocks(io, n.div_ceil(BLOCK), threads, StoreMode::Serial, |b, _emit| {
-        let first = b * BLOCK;
-        let m = BLOCK.min(n - first);
-        let mut vals = vec_filled(m * k, 0.0)?;
-        io.read_block(vars, Rows::Range { first, n: m }, &mut vals)?;
-        Ok(vals)
-    })?;
-    for (b, vals) in blocks.iter().enumerate() {
-        let first = b * BLOCK;
-        let m = vals.len() / k;
-        for (j, col) in cols.iter_mut().enumerate() {
-            for r in 0..m {
-                col[first + r] = vals[r * k + j];
+    // depends on k only, as every item size must
+    let rows = (READ_VALUES / k).clamp(256, BLOCK);
+    let mut views: Vec<&mut [f64]> = cols.iter_mut().map(Vec::as_mut_slice).collect();
+    for_chunks(io, &mut views, rows, threads_for_rows(threads, n.saturating_mul(k)), |b, ch| {
+        let first = b * rows;
+        let m = ch[0].len();
+        let range = Rows::Range { first, n: m };
+        if k == 1 {
+            return io.read_block(vars, range, ch[0]);
+        }
+        let mut buf = vec_zeroed(m * k)?;
+        io.read_block(vars, range, &mut buf)?;
+        for (j, col) in ch.iter_mut().enumerate() {
+            for (r, x) in col.iter_mut().enumerate() {
+                *x = buf[r * k + j];
             }
         }
-    }
+        Ok(())
+    })?;
     Ok(cols)
 }
 
@@ -202,8 +279,11 @@ mod tests {
             (0..n).map(|i| if i % 7 == 0 { f64::NAN } else { i as f64 * 0.5 }).collect(),
             (0..n).map(|i| if i % 5 == 0 { miss_a() } else { -(i as f64) }).collect(),
         ];
-        let strs = vec![(0..n).map(|i| format!("v{i}").into_bytes()).collect()];
-        (io, Output { nums, strs })
+        let mut col = StrCol::default();
+        for i in 0..n {
+            col.push(format!("v{i}").as_bytes()).unwrap();
+        }
+        (io, Output { nums, strs: vec![col] })
     }
 
     #[test]
@@ -251,6 +331,45 @@ mod tests {
             assert_eq!(c[0], y);
             assert_eq!(c[1][2].to_bits(), miss_a().to_bits());
             assert_eq!(c[1][n - 1], (n - 1) as f64);
+            let c = read_cols(&io, &[1], threads).unwrap();
+            assert_eq!(c[0][2].to_bits(), miss_a().to_bits());
+            assert_eq!(c[0][..2], x[..2]);
+            assert_eq!(c[0][3..], x[3..]);
         }
+    }
+
+    #[test]
+    fn read_cols_covers_every_row_of_wide_varlists() {
+        // 1100 variables: blocks of 256 rows; n not a multiple of it
+        let n = 3 * 256 + 5;
+        let mut io = MemIo::new(n);
+        let vars: Vec<i32> = (0..1100)
+            .map(|j| {
+                let c = io.add_num(&(0..n).map(|i| (i * 1100 + j) as f64).collect::<Vec<_>>());
+                io.push_var(c)
+            })
+            .collect();
+        for threads in [1, 3] {
+            let c = read_cols(&io, &vars, threads).unwrap();
+            for (j, col) in c.iter().enumerate() {
+                assert!(col.iter().enumerate().all(|(i, &v)| v == (i * 1100 + j) as f64), "variable {j}");
+            }
+        }
+        assert!(read_cols(&io, &[], 2).unwrap().is_empty());
+    }
+
+    #[test]
+    fn string_columns_keep_values_in_order() {
+        let mut a = StrCol::default();
+        for s in ["", "x", "", "longer value", ""] {
+            a.push(s.as_bytes()).unwrap();
+        }
+        let got: Vec<&[u8]> = a.iter().map(CStr::to_bytes).collect();
+        assert_eq!(got, [&b""[..], b"x", b"", b"longer value", b""]);
+        assert_eq!(a.len(), 5);
+        let b = StrCol::from_chunks(vec![b"\0x\0".to_vec(), Vec::new(), b"\0longer value\0\0".to_vec()], 5);
+        assert_eq!(a, b);
+        assert!(a.push(b"a\0b").is_err());
+        assert_eq!(StrCol::default().iter().count(), 0);
     }
 }

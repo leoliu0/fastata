@@ -20,6 +20,7 @@ mod par;
 mod quant;
 mod selftest;
 mod strnum;
+#[cfg(feature = "probes")]
 mod strprobe;
 #[cfg(test)]
 mod testutil;
@@ -61,7 +62,9 @@ pub unsafe extern "C" fn pginit(p: *mut c_void) -> c_int {
 /// A fallback ([`Error::fallback`]) sets local `fx_fallback` to the reason and returns 0. Any
 /// other error is printed, stored in local `fx_errmsg` (the ado calls the plugin under `capture`,
 /// which hides the printed message) and returned as the return code. Both empty the cache of the
-/// two-phase protocol. Last, local `fx_locals` lists every local the call set.
+/// two-phase protocol. Every call sets local `fx_plugver` (the plugin version) first, whatever
+/// the command, so `_fx_call.ado` checks the version on the call itself. Last, local
+/// `fx_locals` lists every local the call set.
 ///
 /// # Safety
 /// `argv` holds `argc` NUL-terminated strings (Stata guarantees this).
@@ -71,6 +74,9 @@ pub unsafe extern "C" fn stata_call(argc: c_int, argv: *mut *mut c_char) -> c_in
         .map(|i| unsafe { CStr::from_ptr(*argv.add(i)) }.to_string_lossy().into_owned())
         .collect();
     io::saved_locals();
+    // Every call reports the plugin version, so _fx_call checks it without a call of its own.
+    // Best effort: a missing fx_plugver makes _fx_call fall back.
+    let _ = io::local_save("fx_plugver", env!("CARGO_PKG_VERSION"));
     let rc = match panic::catch_unwind(AssertUnwindSafe(|| run(&argv))) {
         Ok(Ok(())) => 0,
         Ok(Err(e)) if e.is_fallback() => {
@@ -112,15 +118,30 @@ fn report(err: Error) -> c_int {
     err.rc
 }
 
+/// Compute phases: each starts from an empty cache, so a result the ado never stored (Break
+/// between the phases, a fallback decided in the ado) is not held through the next peak.
+const COMPUTE: [&str; 7] = ["egen", "isid", "dup", "quant", "destring", "tostring", "cachetest"];
+
 fn run(argv: &[String]) -> Res<()> {
     let a = Args::parse(argv)?;
-    let spi = io::SpiIo::new();
-    match a.cmd.as_str() {
-        "version" => {
-            a.only(&[])?;
-            io::local_save("fx_plugver", env!("CARGO_PKG_VERSION"))
+    if a.cmd == "version" {
+        a.only(&[])?;
+        return io::local_save("fx_plugver", env!("CARGO_PKG_VERSION"));
+    }
+    if COMPUTE.contains(&a.cmd.as_str()) {
+        cache::clear();
+    }
+    let spi = match io::SpiIo::new() {
+        Ok(s) => s,
+        // never a fallback for `store`: the ado has already added its outputs
+        Err(e) if e.is_fallback() && a.cmd == "store" => {
+            return Err(Error::new(9999, format!("fastata: internal error (store with {}); please report it", e.msg)));
         }
+        Err(e) => return Err(e),
+    };
+    match a.cmd.as_str() {
         "selftest" => selftest::run(&spi, &a),
+        #[cfg(feature = "probes")]
         "strprobe" => strprobe::run(&spi, &a),
         "cachetest" => cache::cachetest(&spi, &a),
         "store" => cache::store(&spi, &a),
