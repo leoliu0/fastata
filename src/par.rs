@@ -67,6 +67,17 @@ pub fn resolve_threads(threads: usize, items: usize) -> usize {
     t.min(items).max(1)
 }
 
+/// Fewest observations worth a worker thread of their own: starting a thread costs 30-40 µs,
+/// about what one thread spends on this many rows in the cheapest pass.
+pub const MIN_ROWS_PER_THREAD: usize = 1 << 16;
+
+/// Threads for a region whose total work is `rows` observations, whatever its number of work
+/// items: `threads` (0 = every logical CPU), at most one per [`MIN_ROWS_PER_THREAD`] rows, at
+/// least 1. Work items stay fixed, so results do not depend on it.
+pub fn threads_for_rows(threads: usize, rows: usize) -> usize {
+    resolve_threads(threads, rows.div_ceil(MIN_ROWS_PER_THREAD))
+}
+
 fn write_job<I: Io + ?Sized>(io: &I, job: &WriteJob) -> Res<()> {
     io.write_block(&job.vars, job.rows.as_rows(), &job.vals, job.skip.as_deref())
 }
