@@ -86,6 +86,33 @@ impl<'a, T: Copy> Shared<'a, T> {
     }
 }
 
+/// Element types whose all-zero bit pattern is a value (0, 0.0, false).
+pub trait Zero: Copy {}
+
+impl Zero for u32 {}
+impl Zero for u64 {}
+impl Zero for usize {}
+impl Zero for f64 {}
+impl Zero for bool {}
+impl<A: Zero, B: Zero> Zero for (A, B) {}
+
+/// `len` zeros, or r(909). Unlike `vec_filled`, nothing is written here: large blocks come from
+/// the system as untouched zero pages, first touched (in parallel) by the workers that fill them.
+pub fn vec_zeroed<T: Zero>(len: usize) -> Res<Vec<T>> {
+    let layout = std::alloc::Layout::array::<T>(len).map_err(|_| Error::oom())?;
+    if layout.size() == 0 {
+        return Ok(Vec::new());
+    }
+    // SAFETY: the layout has a nonzero size.
+    let p = unsafe { std::alloc::alloc_zeroed(layout) }.cast::<T>();
+    if p.is_null() {
+        return Err(Error::oom());
+    }
+    // SAFETY: allocated by the global allocator with the layout of `len` T's, all of them zero
+    // bits, a valid T.
+    Ok(unsafe { Vec::from_raw_parts(p, len, len) })
+}
+
 /// Item `c` of `len` positions cut into [`KEY_CHUNK`]s.
 fn chunk(c: usize, len: usize) -> std::ops::Range<usize> {
     c * KEY_CHUNK..((c + 1) * KEY_CHUNK).min(len)
@@ -107,10 +134,10 @@ where
 pub fn par_map<I, T, F>(io: &I, len: usize, threads: usize, f: F) -> Res<Vec<T>>
 where
     I: Io,
-    T: Copy + Send + Default,
+    T: Zero + Send,
     F: Fn(usize) -> Res<T> + Sync,
 {
-    let mut out = vec_filled(len, T::default())?;
+    let mut out = vec_zeroed(len)?;
     let sh = Shared::new(&mut out);
     par_for(io, len, threads, |i| {
         // SAFETY: each index is written by the one chunk that holds it.
@@ -120,8 +147,9 @@ where
     Ok(out)
 }
 
-/// Sorts `v` by `cmp` in parallel (sorted chunks, then rounds of pairwise merges). The result is
-/// the same for any thread count when `cmp` orders no two elements of `v` as equal.
+/// Sorts `v` by `cmp` in parallel (sorted chunks, then rounds of pairwise merges, each merge cut
+/// into pieces along its merge path so every round uses every thread). The result is the same
+/// for any thread count when `cmp` orders no two elements of `v` as equal.
 pub fn par_sort_by<I, T, F>(io: &I, v: &mut Vec<T>, threads: usize, cmp: F) -> Res<()>
 where
     I: Io,
@@ -144,22 +172,39 @@ where
             Ok(())
         })?;
     }
+    // a before b on equal elements
+    let before = |x: &T, y: &T| cmp(x, y) != Ordering::Greater;
     let mut src = std::mem::take(v);
     let mut dst = vec_filled(n, src[0])?;
     let mut width = width0;
     while width < n {
+        let pairs = n.div_ceil(2 * width);
+        let per = t.div_ceil(pairs);
         {
             let (s, d) = (&src, Shared::new(&mut dst));
-            for_blocks(io, n.div_ceil(2 * width), t, StoreMode::Parallel, |k, _emit| {
+            for_blocks(io, pairs * per, t, StoreMode::Parallel, |it, _emit| {
+                let (k, piece) = (it / per, it % per);
                 let lo = k * 2 * width;
                 let mid = (lo + width).min(n);
                 let hi = (lo + 2 * width).min(n);
-                // SAFETY: pairs are disjoint.
-                let out = unsafe { d.slice(lo, hi) };
                 let (a, b) = (&s[lo..mid], &s[mid..hi]);
-                let (mut i, mut j) = (0, 0);
-                for o in out.iter_mut() {
-                    *o = if j == b.len() || (i < a.len() && cmp(&a[i], &b[j]) != Ordering::Greater) {
+                let size = (hi - lo).div_ceil(per);
+                let k0 = (piece * size).min(hi - lo);
+                let k1 = (k0 + size).min(hi - lo);
+                // elements of a among the first k outputs of the merge
+                let corank = |k: usize| {
+                    let (mut l, mut h) = (k.saturating_sub(b.len()), k.min(a.len()));
+                    while l < h {
+                        let i = (l + h) / 2;
+                        if before(&a[i], &b[k - i - 1]) { l = i + 1 } else { h = i }
+                    }
+                    l
+                };
+                let (mut i, i1) = (corank(k0), corank(k1));
+                let (mut j, j1) = (k0 - i, k1 - i1);
+                // SAFETY: pieces are disjoint.
+                for o in unsafe { d.slice(lo + k0, lo + k1) } {
+                    *o = if j == j1 || (i < i1 && before(&a[i], &b[j])) {
                         i += 1;
                         a[i - 1]
                     } else {
@@ -180,7 +225,7 @@ where
 /// Reads numeric variable `var` as flags (`!= 0`) for every observation.
 pub fn read_flags<I: Io>(io: &I, var: i32, threads: usize) -> Res<Vec<bool>> {
     let n = io.nobs();
-    let mut out = vec_filled(n, false)?;
+    let mut out = vec_zeroed(n)?;
     let sh = Shared::new(&mut out);
     for_blocks(io, n.div_ceil(KEY_CHUNK), threads_for_rows(threads, n), StoreMode::Parallel, |c, _emit| {
         let r = chunk(c, n);
@@ -208,7 +253,7 @@ pub fn sample_from_bools<I: Io>(io: &I, touse: &[bool], threads: usize) -> Res<V
         off.push(acc);
         acc += k;
     }
-    let mut samp = vec_filled(acc, 0u32)?;
+    let mut samp = vec_zeroed(acc)?;
     let sh = Shared::new(&mut samp);
     for_blocks(io, nch, th, StoreMode::Parallel, |c, _emit| {
         let mut k = off[c];
@@ -372,6 +417,32 @@ impl KeyView {
         okey(self.num[p * self.nnum + j])
     }
 
+    /// An order-preserving prefix of the keys at position `p`: two positions whose prefixes differ
+    /// compare as their prefixes. A number contributes its [`okey`], a string its first bytes
+    /// big-endian, padded with zero bytes (which no Stata string holds): the first key and, after
+    /// a numeric first key, the second.
+    pub fn prefix(&self, p: usize) -> (u64, u64) {
+        let word = |s: &[u8], from: usize| {
+            let mut w = [0u8; 8];
+            let s = s.get(from..).unwrap_or(&[]);
+            let m = s.len().min(8);
+            w[..m].copy_from_slice(&s[..m]);
+            u64::from_be_bytes(w)
+        };
+        let num = |j: usize| okey(self.num[p * self.nnum + j]);
+        match self.kinds[0] {
+            Kind::Str(c) => {
+                let s = self.strs[c].get(p);
+                (word(s, 0), word(s, 8))
+            }
+            Kind::Num(j) => match self.kinds.get(1) {
+                Some(&Kind::Num(j1)) => (num(j), num(j1)),
+                Some(&Kind::Str(c)) => (num(j), word(self.strs[c].get(p), 0)),
+                None => (num(j), 0),
+            },
+        }
+    }
+
     /// Whether key `k` (varlist order) is numeric and holds an integer at position `p`.
     pub fn is_int(&self, k: usize, p: usize) -> bool {
         match self.kinds[k] {
@@ -437,20 +508,19 @@ fn as_f64_mut(s: &mut [u64]) -> &mut [f64] {
 fn read_keys<I: Io>(io: &I, kinds: &[Kind], numv: &[i32], strv: &[i32], src: Src<'_>, threads: usize, store: bool, opts: ReadOpts) -> Res<Read> {
     let ns = src.len();
     let nnum = numv.len();
-    let mut miss = if opts.miss { vec_filled(ns, false)? } else { Vec::new() };
+    let mut miss = if opts.miss { vec_zeroed(ns)? } else { Vec::new() };
     // Without stored keys: the hash of each position (the string part first, from the string
     // pass; the numeric pass folds its part in).
-    let mut h = if store { Vec::new() } else { vec_filled(ns, 0u64)? };
+    let mut h = if store { Vec::new() } else { vec_zeroed(ns)? };
     let mut strs = Vec::new();
     let mut shash = Vec::new();
 
-    // 1. Strings, on this thread.
+    // 1. Strings, on this thread (stored strings are hashed afterwards, in parallel).
     if !strv.is_empty() {
         if store {
             for _ in strv {
-                strs.push(StrCol { off: vec_filled(ns + 1, 0usize)?, bytes: Vec::new() });
+                strs.push(StrCol { off: vec_zeroed(ns + 1)?, bytes: Vec::new() });
             }
-            shash = vec_filled(ns, 0u64)?;
         }
         let mut buf = Vec::new();
         let bad = |b: u8| b <= 0x20 || b >= 0x7f;
@@ -476,24 +546,26 @@ fn read_keys<I: Io>(io: &I, kinds: &[Kind], numv: &[i32], strv: &[i32], src: Src
                     return Err(Error::fallback("string blanks"));
                 }
                 m |= s.is_empty();
-                hs = mix(hs ^ fnv1a(s));
                 if store {
                     strs[c].off[p + 1] = end;
+                } else {
+                    hs = mix(hs ^ fnv1a(s));
                 }
             }
-            if store {
-                shash[p] = hs;
-            } else {
+            if !store {
                 h[p] = hs;
             }
             if opts.miss {
                 miss[p] = m;
             }
         }
+        if store {
+            shash = par_map(io, ns, threads, |p| Ok(strs.iter().fold(SEED, |hs, c| mix(hs ^ fnv1a(c.get(p))))))?;
+        }
     }
 
     // 2. Numeric keys, in parallel blocks of observations.
-    let mut num = if store { vec_filled(ns * nnum, 0u64)? } else { Vec::new() };
+    let mut num = if store { vec_zeroed(ns * nnum)? } else { Vec::new() };
     if nnum > 0 {
         let missval = io.missval();
         let total = match src {
@@ -824,8 +896,8 @@ impl Keyed {
         if !need.any() {
             return Ok(Some(g));
         }
-        let mut starts = vec_filled(ng + 1, 0usize)?;
-        let mut gid = if need.gid { vec_filled(ns, 0u32)? } else { Vec::new() };
+        let mut starts = vec_zeroed(ng + 1)?;
+        let mut gid = if need.gid { vec_zeroed(ns)? } else { Vec::new() };
         {
             let (s_st, s_gid) = (Shared::new(&mut starts), Shared::new(&mut gid));
             for_blocks(io, nch, th, StoreMode::Parallel, |c, _emit| {
@@ -893,7 +965,7 @@ impl Keyed {
                     acc += k[q];
                 }
             }
-            pidx = vec_filled(ns, 0u32)?;
+            pidx = vec_zeroed(ns)?;
             let sh = Shared::new(&mut pidx);
             for_blocks(io, nch, th, StoreMode::Parallel, |c, _emit| {
                 let mut cur = [0usize; PARTS];
@@ -911,7 +983,7 @@ impl Keyed {
 
         // 2. Per partition: local ids in order of first appearance.
         let keep_lid = need.gid || need.ord;
-        let mut lid = if keep_lid { vec_filled(ns, 0u32)? } else { Vec::new() };
+        let mut lid = if keep_lid { vec_zeroed(ns)? } else { Vec::new() };
         let parts = {
             let s_lid = Shared::new(&mut lid);
             for_blocks(io, nparts, th, StoreMode::Parallel, |q, _emit| {
@@ -947,11 +1019,11 @@ impl Keyed {
         if !need.any() {
             return Ok(g);
         }
-        let mut gid = if need.gid { vec_filled(ns, 0u32)? } else { Vec::new() };
-        let mut ord = if need.ord { vec_filled(ns, 0u32)? } else { Vec::new() };
-        let mut starts = if need.ord { vec_filled(ng + 1, 0usize)? } else { Vec::new() };
-        let mut reps = if need.reps { vec_filled(ng, 0u32)? } else { Vec::new() };
-        let mut sizes = if need.sizes { vec_filled(ng, 0u32)? } else { Vec::new() };
+        let mut gid = if need.gid { vec_zeroed(ns)? } else { Vec::new() };
+        let mut ord = if need.ord { vec_zeroed(ns)? } else { Vec::new() };
+        let mut starts = if need.ord { vec_zeroed(ng + 1)? } else { Vec::new() };
+        let mut reps = if need.reps { vec_zeroed(ng)? } else { Vec::new() };
+        let mut sizes = if need.sizes { vec_zeroed(ng)? } else { Vec::new() };
         {
             let s_gid = Shared::new(&mut gid);
             let s_ord = Shared::new(&mut ord);

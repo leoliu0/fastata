@@ -4,10 +4,10 @@
 
 use std::marker::PhantomData;
 
-use crate::error::{Res, vec_filled, vec_with_capacity};
-use crate::group::{KEY_CHUNK, Keyed, Need, ReadOpts, RepKeys, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, sorted_starts};
+use crate::error::{Res, vec_with_capacity};
+use crate::group::{KEY_CHUNK, Keyed, Need, ReadOpts, RepKeys, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, sorted_starts, vec_zeroed};
 use crate::io::Io;
-use crate::par::{StoreMode, for_blocks};
+use crate::par::{StoreMode, for_blocks, threads_for_rows};
 
 /// Sample observations of each group: group `g` is `ord[starts[g]..starts[g + 1]]`, ascending.
 /// Groups without sample observations do not appear.
@@ -95,7 +95,7 @@ pub fn hashed_groups<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, thread
 pub fn tag_column<I: Io>(io: &I, keys: &[i32], touse: Option<&[bool]>, missing: bool, threads: usize) -> Res<Vec<f64>> {
     let kd = keyed_sample(io, keys, touse, threads, !missing)?;
     let g = kd.group(io, threads, Need { reps: true, ..Need::default() })?;
-    let mut out = vec_filled(io.nobs(), 0.0)?;
+    let mut out = vec_zeroed(io.nobs())?;
     let sh = Shared::new(&mut out);
     par_for(io, g.ngroups, threads, |gi| {
         let r = g.reps[gi] as usize;
@@ -129,7 +129,7 @@ where
     let mut keyint = Vec::new();
     if !missing {
         for k in 0..keys.len() {
-            let ints = par_map(io, keep.len().div_ceil(KEY_CHUNK), threads, |c| {
+            let ints = for_blocks(io, keep.len().div_ceil(KEY_CHUNK), threads_for_rows(threads, keep.len()), StoreMode::Parallel, |c, _emit| {
                 let lo = c * KEY_CHUNK;
                 let hi = (lo + KEY_CHUNK).min(keep.len());
                 Ok(keep[lo..hi].iter().all(|&gi| rk.view().is_int(k, rk.pos(gi as usize))))
@@ -137,7 +137,8 @@ where
             keyint.push(ints.iter().all(|&b| b));
         }
     }
-    let mut out = vec_filled(io.nobs(), io.missval())?;
+    let miss = io.missval();
+    let mut out = par_map(io, io.nobs(), threads, |_| Ok(miss))?;
     let sh = Shared::new(&mut out);
     par_for(io, kd.len(), threads, |p| {
         let k = numbers[g.gid[p] as usize];
@@ -161,29 +162,13 @@ fn group_numbers<I: Io>(io: &I, rk: &RepKeys<'_>, keep: &[u32], ngroups: usize, 
         let mut pairs = par_map(io, k, threads, |i| Ok((view.num_okey(rk.pos(keep[i] as usize), 0), keep[i])))?;
         par_sort_by(io, &mut pairs, threads, |a, b| a.cmp(b))?;
         par_map(io, k, threads, |i| Ok(pairs[i].1))?
-    } else if view.nkeys() == view.nnum() {
-        // numeric keys: rows of order keys, flat
-        let nn = view.nnum();
-        let mut rows = vec_filled(k * nn, 0u64)?;
-        let sh = Shared::new(&mut rows);
-        par_for(io, k, threads, |i| {
-            let p = rk.pos(keep[i] as usize);
-            for j in 0..nn {
-                // SAFETY: row i is written by the chunk that holds i only.
-                unsafe { sh.set(i * nn + j, view.num_okey(p, j)) };
-            }
-            Ok(())
-        })?;
-        let mut idx = par_map(io, k, threads, |i| Ok(i as u32))?;
-        par_sort_by(io, &mut idx, threads, |&a, &b| rows[a as usize * nn..][..nn].cmp(&rows[b as usize * nn..][..nn]))?;
-        par_map(io, k, threads, |i| Ok(keep[idx[i] as usize]))?
     } else {
-        let mut idx = vec_with_capacity(k)?;
-        idx.extend_from_slice(keep);
-        par_sort_by(io, &mut idx, threads, |&a, &b| view.cmp(rk.pos(a as usize), rk.pos(b as usize)))?;
-        idx
+        // (key prefix, group) records, compared in place; equal prefixes compare whole tuples
+        let mut recs = par_map(io, k, threads, |i| Ok((view.prefix(rk.pos(keep[i] as usize)), keep[i])))?;
+        par_sort_by(io, &mut recs, threads, |a, b| a.0.cmp(&b.0).then_with(|| view.cmp(rk.pos(a.1 as usize), rk.pos(b.1 as usize))))?;
+        par_map(io, k, threads, |i| Ok(recs[i].1))?
     };
-    let mut numbers = vec_filled(ngroups, 0u32)?;
+    let mut numbers = vec_zeroed(ngroups)?;
     let sh = Shared::new(&mut numbers);
     par_for(io, k, threads, |r| {
         // SAFETY: each group appears once in `order`.
@@ -260,4 +245,93 @@ where
         Ok(())
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::group::okey;
+    use crate::io::{MISS, MemIo};
+    use crate::testutil::{Rng, miss_a};
+
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+    enum K {
+        N(u64),
+        S(Vec<u8>),
+    }
+
+    /// `group()` and `tag()` columns against a naive reference (Stata's order of the key tuples,
+    /// first observation of each tuple), for 1 and 8 threads, over more than 65,536 groups (the
+    /// parallel sort), keys of every shape (one or two numbers, strings sharing long prefixes,
+    /// mixed, more than 4 keys), with and without a sample and `missing`; and keyint.
+    #[test]
+    fn group_and_tag_columns_match_naive_for_any_thread_count() {
+        let n = 150_000;
+        let mut rng = Rng::new(17);
+        let special = [0.0, -0.0, MISS, miss_a(), 1.5, -2.0];
+        let a: Vec<f64> = (0..n)
+            .map(|_| {
+                let r = rng.next_u64();
+                if r % 10 == 0 { special[(r / 10 % 6) as usize] } else { (r % 200_000) as f64 }
+            })
+            .collect();
+        let b: Vec<f64> = (0..n).map(|_| (rng.next_u64() % 3) as f64).collect();
+        let s: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let r = rng.next_u64() % 120_000;
+                if r < 300 { Vec::new() } else { format!("a common prefix of 24 b{r}").into_bytes() }
+            })
+            .collect();
+        let t: Vec<f64> = (0..n).map(|_| f64::from(u8::from(rng.unif() < 0.8))).collect();
+        let mut io = MemIo::new(n);
+        let (ca, cb, cs, ct) = (io.add_num(&a), io.add_num(&b), io.add_str(s.clone()), io.add_num(&t));
+        let (pa, pb, ps, pt) = (io.push_var(ca), io.push_var(cb), io.push_var(cs), io.push_var(ct));
+        let touse: Vec<bool> = t.iter().map(|&x| x != 0.0).collect();
+        let canon = |v: f64| if v == 0.0 { 0 } else { v.to_bits() };
+        let key = |p: i32, o: usize| -> K {
+            if p == ps { K::S(s[o].clone()) } else { K::N(okey(canon(if p == pa { a[o] } else { b[o] }))) }
+        };
+        let miss_of = |p: i32, o: usize| if p == ps { s[o].is_empty() } else { (if p == pa { a[o] } else { b[o] }) >= MISS };
+        for keys in [vec![pa], vec![pa, pb], vec![ps], vec![pb, ps], vec![ps, pa], vec![pa, pb, ps, pb, pa]] {
+            for samp in [false, true] {
+                let tu = samp.then_some(&touse[..]);
+                for missing in [false, true] {
+                    let incl = |o: usize| (!samp || touse[o]) && (missing || !keys.iter().any(|&p| miss_of(p, o)));
+                    let mut m: BTreeMap<Vec<K>, f64> = BTreeMap::new();
+                    for o in (0..n).filter(|&o| incl(o)) {
+                        m.insert(keys.iter().map(|&p| key(p, o)).collect(), 0.0);
+                    }
+                    for (r, v) in m.values_mut().enumerate() {
+                        *v = (r + 1) as f64;
+                    }
+                    let mut first = std::collections::HashSet::new();
+                    let mut tag_want = vec![0.0; n];
+                    let mut grp_want = vec![MISS; n];
+                    for o in (0..n).filter(|&o| incl(o)) {
+                        let k: Vec<K> = keys.iter().map(|&p| key(p, o)).collect();
+                        grp_want[o] = m[&k];
+                        if first.insert(k) {
+                            tag_want[o] = 1.0;
+                        }
+                    }
+                    let int_want: Vec<bool> = if missing {
+                        Vec::new()
+                    } else {
+                        keys.iter().map(|&p| p != ps && (0..n).filter(|&o| incl(o)).all(|o| { let v = if p == pa { a[o] } else { b[o] }; v == v.trunc() })).collect()
+                    };
+                    for threads in [1, 8] {
+                        let what = format!("keys {keys:?} samp={samp} missing={missing} threads={threads}");
+                        let (got, keyint) = group_column(&io, &keys, tu, missing, threads, Ok).unwrap();
+                        assert!(got.iter().zip(&grp_want).all(|(x, y)| x.to_bits() == y.to_bits()), "group {what}");
+                        assert_eq!(keyint, int_want, "keyint {what}");
+                        let tag = tag_column(&io, &keys, tu, missing, threads).unwrap();
+                        assert!(tag == tag_want, "tag {what}");
+                    }
+                }
+            }
+        }
+        let _ = pt;
+    }
 }

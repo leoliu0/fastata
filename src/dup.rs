@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use crate::args::Args;
 use crate::cache::{self, Output};
 use crate::error::{Error, Res, vec_filled, vec_with_capacity};
-use crate::group::{Keyed, Need, ReadOpts, Shared, par_for, par_sort_by, read_flags, sample_from_bools};
+use crate::group::{Keyed, Need, ReadOpts, Shared, par_for, par_map, par_sort_by, read_flags, sample_from_bools, vec_zeroed};
 use crate::io::{self, Io};
 
 /// What `isid` reports: (observations with a missing key, distinct tuples when computed).
@@ -123,7 +123,7 @@ fn dup_compute<I: Io>(io: &I, sub: Sub, touse: bool, threads: usize) -> Res<DupR
             r.table = by_size.into_iter().map(|(c, f)| (c, f, f as f64 - f as f64 / c as f64)).collect();
         }
         Sub::Tag => {
-            let mut col = vec_filled(n, f64::NAN)?;
+            let mut col = par_map(io, n, threads, |_| Ok(f64::NAN))?;
             let sh = Shared::new(&mut col);
             par_for(io, ns, threads, |p| {
                 // SAFETY: each sample position is its own observation.
@@ -136,7 +136,7 @@ fn dup_compute<I: Io>(io: &I, sub: Sub, touse: bool, threads: usize) -> Res<DupR
         Sub::Drop => {
             r.ndrop = ns - ng;
             if r.ndrop > 0 {
-                let mut col = vec_filled(n, 0.0)?;
+                let mut col = vec_zeroed(n)?;
                 let sh = Shared::new(&mut col);
                 par_for(io, ns, threads, |p| {
                     if g.reps[g.gid[p] as usize] as usize != p {
@@ -174,7 +174,7 @@ fn dup_compute<I: Io>(io: &I, sub: Sub, touse: bool, threads: usize) -> Res<DupR
                 vec![order, dgroup, ngroup]
             } else {
                 // offsets of each duplicated group (by Group) in the listing
-                let mut rank = vec_filled(ng, 0u32)?;
+                let mut rank = vec_zeroed(ng)?;
                 let mut off = vec_filled(r.ndup + 1, 0usize)?;
                 for (j, &i) in idx.iter().enumerate() {
                     let q = dups[i as usize] as usize;
