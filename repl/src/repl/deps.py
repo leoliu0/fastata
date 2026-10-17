@@ -13,7 +13,7 @@ from pathlib import Path
 
 import requests
 
-from . import paths, sandbox
+from . import paths, safefs, sandbox
 from .patching import read_latin1
 
 # command or file name -> SSC packages that provide it (in install order)
@@ -59,6 +59,11 @@ NET_HOMES: dict[str, list[tuple[str, str]]] = {
     "multe": [("multe", "https://raw.githubusercontent.com/gphk-metrics/stata-multe/main/")],
 }
 WEBSEE = "https://www.stata.com/websee.cgi"
+# A net site the install do-file may quote as from(`"<site>"'): http(s), and none of the
+# characters Stata expands or that end the string or option there (` ' " $ ( ) \ and blanks).
+# Sites come from package code and from Stata's search results, and the install sandbox has the
+# network: anything else is dropped.
+SITE_RE = re.compile(r"^https?://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~%/+=,;:@&?-]*)?$")
 
 
 def static_installs(src: Path) -> list[dict]:
@@ -68,7 +73,7 @@ def static_installs(src: Path) -> list[dict]:
 
     def add(d: dict) -> None:
         name = d.get("ssc") or d.get("net") or ""
-        if not NAME_RE.match(name):
+        if not NAME_RE.match(name) or ("from" in d and not SITE_RE.match(d["from"])):
             return
         k = tuple(sorted(d.items()))
         if k not in seen:
@@ -201,7 +206,7 @@ def resolution(kind: str, name: str, search: bool = True) -> dict:
             add([ssc(p)])
     if search:
         for pkg, site in websee(name)[:6]:
-            if not NAME_RE.match(pkg):
+            if not NAME_RE.match(pkg) or not SITE_RE.match(site):
                 continue
             item = ssc(pkg) if "fmwww.bc.edu/repec/bocode" in site.lower() else {"net": pkg, "from": site}
             add([item])
@@ -213,6 +218,9 @@ def item_label(it: dict) -> str:
 
 
 def item_cmd(it: dict) -> str:
+    name = it.get("ssc") or it.get("net") or ""
+    if not NAME_RE.match(name) or ("net" in it and not SITE_RE.match(it.get("from", ""))):
+        raise ValueError(f"unsafe install item {it!r}")
     if "ssc" in it:
         return f"ssc install {it['ssc']}, replace"
     return f'net install {it["net"]}, from(`"{it["from"]}"\') replace'
@@ -249,7 +257,7 @@ def install_groups(pkg: str, groups: list[dict], log=print) -> tuple[list[str], 
     do = home / "install.do"
     do.write_text(install_text(groups, deps))
     sandbox.stata_batch(do, cwd=home, home=home, rw=[deps], network=True, timeout=1800)
-    text = (home / "install.log").read_text(errors="replace") if (home / "install.log").exists() else ""
+    text = safefs.read_text(home, "install.log")
     ok, failed = [], []
     for g in groups:
         m = re.search(r"^FXDEP " + re.escape(g["label"]) + r" (\d+)$", text, re.M)

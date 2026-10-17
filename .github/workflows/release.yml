@@ -19,6 +19,9 @@ on:
 permissions:
   contents: read
 
+# Third-party actions are pinned to commit SHAs (the tag each one had is in the comment): the
+# publish job can write to the repository and gh-pages.
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -29,7 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Tag, Cargo and ado versions agree
         id: check
         run: |
@@ -42,7 +45,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: quay.io/pypa/manylinux_2_28_x86_64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install Rust
         run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -64,7 +67,7 @@ jobs:
           cc -O2 -DSYSTEM=OPUNIX -Ic tests/mockhost/mockhost.c -ldl -lm -o target/mockhost
           target/mockhost ./fastata.linux64.plugin
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: plugin-linux
           path: fastata.linux64.plugin
@@ -73,10 +76,11 @@ jobs:
     needs: version
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Build universal plugin
@@ -95,7 +99,7 @@ jobs:
           cc -O2 -DSYSTEM=OPUNIX -Ic tests/mockhost/mockhost.c -o target/mockhost
           target/mockhost ./fastata.macos-universal.plugin
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: plugin-macos
           path: fastata.macos-universal.plugin
@@ -104,9 +108,11 @@ jobs:
     needs: version
     runs-on: windows-2025
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - name: Build
         shell: bash
@@ -114,7 +120,7 @@ jobs:
           cargo build --release --target x86_64-pc-windows-msvc
           cp target/x86_64-pc-windows-msvc/release/fastata.dll fastata.win64.plugin
 
-      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
 
       - name: Mock host
         shell: cmd
@@ -122,7 +128,7 @@ jobs:
           cl /nologo /O2 /DSYSTEM=STWIN32 /Ic tests\mockhost\mockhost.c /Fe:target\mockhost.exe
           target\mockhost.exe fastata.win64.plugin
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: plugin-windows
           path: fastata.win64.plugin
@@ -131,9 +137,9 @@ jobs:
     needs: [version, linux, macos, windows]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: plugin-*
           path: artifacts
@@ -151,11 +157,11 @@ jobs:
           (cd dist && zip -r "../fastata-v${VERSION}-stata.zip" stata)
           unzip -l "fastata-v${VERSION}-stata.zip" | grep -c -E 'fastata\.(linux64|macos-universal|win64)\.plugin$' | grep -qx 3
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stata-net-install
           path: dist
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: stata-zip
           path: fastata-v${{ needs.version.outputs.version }}-stata.zip
@@ -167,23 +173,23 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stata-net-install
           path: dist
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: stata-zip
           path: release
 
       # The net-install files sit at the site root, so the from() URL is the bare Pages URL.
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: gh-pages
           publish_dir: ./dist/stata
           keep_files: false
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: release/*
