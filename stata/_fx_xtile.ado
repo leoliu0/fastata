@@ -90,41 +90,57 @@ program Fast
 		c_local fx_why "exp"
 		exit
 	}
+	* state-dependent functions: s() and regexs()/ustrregexs() (the last match of
+	* regexm()/ustrregexm(), which this program's parsing calls), and r() in exp when nquantiles()
+	* is given (xtile.ado runs count, which replaces r(), before it evaluates exp)
+	local txt `"`p_exp' `p_if'"'
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(s|regexs|ustrregexs)\s*\(") /*
+		*/ | (`"`p_nq'"' != "" & ustrregexm(`"`p_exp'"', "(^|[^A-Za-z0-9_])r\s*\(")) {
+		c_local fx_why "state"
+		exit
+	}
+	* random-number functions: a fallback after exp or if was evaluated puts the random-number
+	* state back, so that the original draws the same numbers
+	local rng
+	if ustrregexm(`"`txt'"', "(^|[^A-Za-z0-9_])(r[A-Za-z0-9_]*|uniform[A-Za-z0-9_]*)\s*\(") {
+		local rng = c(rngstate)
+	}
+	* a variable name is read directly (syntax leaves a blank after exp when if or in follows)
 	local xv
-	if ustrregexm(`"`p_exp'"', "^[A-Za-z_][A-Za-z0-9_]*$") {
-		capture confirm numeric variable `p_exp'
+	if ustrregexm(`"`p_exp'"', "^\s*([A-Za-z_][A-Za-z0-9_]*)\s*$") {
+		local xn = ustrregexs(1)
+		capture confirm numeric variable `xn'
 		if !_rc {
-			unab xv : `p_exp'
+			unab xv : `xn'
 		}
 	}
 	tempvar touse x
 	local hastouse 0
+	local why
 	if `"`p_if'`p_in'"' != "" | "`xv'" == "" {
 		capture Mark6 `touse' `p_wt' `p_if' `p_in'
-		if _rc {
-			c_local fx_why "error"
-			exit
-		}
-		local hastouse 1
+		if _rc == 1 exit 1
+		if _rc local why "error"
+		else local hastouse 1
 	}
-	if "`xv'" == "" {
+	if "`why'" == "" & "`xv'" == "" {
 		capture Gen6 `x' `touse' `p_exp'
-		if _rc {
-			c_local fx_why "exp"
-			exit
-		}
-		local xv `x'
+		if _rc == 1 exit 1
+		if _rc local why "exp"
+		else local xv `x'
 	}
-	local tv = cond(`hastouse', "`touse'", "")
-	quietly _fx threads
-	_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=xtile" /*
-		*/ "nq=`nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" "touse=`hastouse'"
-	if `fx_plugrc' {
-		c_local fx_why `"plugin error r(`fx_plugrc')"'
-		exit
+	if "`why'" == "" {
+		local tv = cond(`hastouse', "`touse'", "")
+		local fx_threads = cond(c(MP), c(processors), 0)
+		_fx_call `xv' `wv' `tv', quant "phase=compute" "threads=`fx_threads'" "kind=xtile" /*
+			*/ "nq=`nq'" "wtype=`wtype'" "altdef=`=("`p_alt'" != "")'" "touse=`hastouse'"
+		if `fx_plugrc' == 1 exit 1
+		if `fx_plugrc' local why "plugin error r(`fx_plugrc')"
+		else if `"`fx_fallback'"' != "" local why `"`fx_fallback'"'
 	}
-	if `"`fx_fallback'"' != "" {
-		c_local fx_why `"`fx_fallback'"'
+	if `"`why'"' != "" {
+		if `"`rng'"' != "" & `"`rng'"' != c(rngstate) set rngstate `rng'
+		c_local fx_why `"`why'"'
 		exit
 	}
 	local type = cond(`fx_max' <= 100, "byte", cond(`fx_max' <= 32740, "int", "long"))

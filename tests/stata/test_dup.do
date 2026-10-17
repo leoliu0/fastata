@@ -267,5 +267,152 @@ ff "duplicates report g" duplicates fast bnan
 ff "duplicates tag g s, gen(dt)" duplicates fast bnan
 ff "duplicates drop g gbig, force" duplicates fast bnan
 
+mata:
+// (fast, fallback) calls of fastata's cmd this session
+real rowvector _td_counts(string scalar cmd)
+{
+	pointer() scalar p
+
+	if ((p = findexternal("_fx_cnt")) == NULL) return((0, 0))
+	if (!asarray_contains(*p, cmd)) return((0, 0))
+	return(asarray(*p, cmd))
+}
+end
+
+* ---------------------------------------------------------------- duplicates: if with random
+* numbers, state-dependent functions, the frame limit, c(rc)
+* dq "<cmd>" fast|fallback ["<reason>"]: cmd (under capture), then gen after = runiform(), from
+* seed 7 with fastata off and on; a fallback after marksample must draw the same numbers again
+capture program drop dpath
+program dpath
+	args kind why c0 c1 cmd
+	mata: st_local("nfast", strofreal(`c1'[1] - `c0'[1])); st_local("nfb", strofreal(`c1'[2] - `c0'[2]))
+	local w
+	if `nfb' mata: st_local("w", asarray(*findexternal("_fx_why"), "duplicates"))
+	if ("`kind'" == "fast" & (`nfast' != 1 | `nfb' != 0)) | ("`kind'" == "fallback" & (`nfb' != 1 | `"`w'"' != `"`why'"')) {
+		di as err `"`cmd': expected `kind' `why', got `nfast' fast, `nfb' fallback [`w']"'
+		exit 9
+	}
+end
+capture program drop dq
+program dq
+	args cmd kind why
+	foreach m in off on {
+		capture frame drop r_`m'
+		frame copy base r_`m'
+		quietly fastata `m'
+		if "`m'" == "on" mata: _dq0 = _td_counts("duplicates")
+		frame r_`m' {
+			set seed 7
+			capture noisily `cmd'
+			local rc_`m' = _rc
+			gen double after = runiform()
+		}
+	}
+	mata: _dq1 = _td_counts("duplicates")
+	dpath `kind' `"`why'"' _dq0 _dq1 `"`cmd'"'
+	assert `rc_off' == `rc_on'
+	fx_cmpframes r_off r_on, tol(0) what(`"`cmd', then runiform()"')
+	frame drop r_off
+	frame drop r_on
+	global FD_N = $FD_N + 1
+end
+dq "duplicates report g if runiform() > 2" fallback error
+dq "duplicates drop g if runiform() < .5, force" fast
+dq "duplicates tag g if rnormal() > 0, gen(dt)" fast
+
+capture program drop dr1
+program dr1
+	quietly summarize id
+	duplicates drop g if id > r(mean), force
+end
+ff "dr1" duplicates fast
+ff `"duplicates report g if s(x) == """' duplicates fallback
+ff `"duplicates list g if regexm(s, "s(1)") & regexs(1) == "1" & id < 300"' duplicates fallback
+
+* dfr "<cmd>" full|room: cmd in frame base, with every frame Stata allows defined (full) or all
+* but one (room); output and return code as with fastata off; full: falls back [frames]
+capture program drop dfr
+program dfr
+	args cmd how
+	tempfile la lb
+	local k 0
+	while 1 {
+		capture frame create _dfr`k'
+		if _rc continue, break
+		local ++k
+	}
+	if "`how'" == "room" {
+		local --k
+		frame drop _dfr`k'
+	}
+	frame base {
+		quietly fastata off
+		quietly log using `"`la'"', text name(_dfr) nomsg replace
+		capture noisily `cmd'
+		local rca = _rc
+		quietly log close _dfr
+		quietly fastata on
+		mata: _dq0 = _td_counts("duplicates")
+		quietly log using `"`lb'"', text name(_dfr) nomsg replace
+		capture noisily `cmd'
+		local rcb = _rc
+		quietly log close _dfr
+		mata: _dq1 = _td_counts("duplicates")
+	}
+	forvalues i = 0/`=`k'-1' {
+		frame drop _dfr`i'
+	}
+	dpath `=cond("`how'" == "full", "fallback", "fast")' frames _dq0 _dq1 `"`cmd'"'
+	assert `rca' == `rcb'
+	mata: st_local("same", strofreal(cat(st_local("la")) == cat(st_local("lb"))))
+	if !`same' {
+		di as err `"`cmd': output differs with fastata off and on"'
+		type `"`la'"'
+		type `"`lb'"'
+		exit 9
+	}
+	global FD_N = $FD_N + 1
+end
+dfr "duplicates report g" full
+dfr "duplicates examples gbig" full
+dfr "duplicates list g if id < 100" full
+dfr "duplicates report g" room
+dfr "duplicates list g if id < 100" room
+
+* drc "<cmd>": c(rc) after cmd (from c(rc) 7) as with fastata off; the fast path runs
+capture program drop drc
+program drc
+	args cmd
+	foreach m in off on {
+		capture frame drop c_`m'
+		frame copy base c_`m'
+		quietly fastata `m'
+		if "`m'" == "on" mata: _dq0 = _td_counts("duplicates")
+		frame c_`m' {
+			capture error 7
+			quietly `cmd'
+			local left_`m' = c(rc)
+		}
+	}
+	mata: _dq1 = _td_counts("duplicates")
+	frame drop c_off
+	frame drop c_on
+	dpath fast "" _dq0 _dq1 `"`cmd'"'
+	if `left_off' != `left_on' {
+		di as err `"`cmd': c(rc) left `left_off' with fastata off, `left_on' on"'
+		exit 9
+	}
+	global FD_N = $FD_N + 1
+end
+drc "duplicates report g"
+drc "duplicates report g if u < .5"
+drc "duplicates tag g, gen(dt)"
+drc "duplicates drop g gbig, force"
+drc "duplicates drop id, force"
+drc "duplicates examples gbig"
+drc "duplicates list g if id < 100"
+drc "duplicates list id"
+
 
 di as result "TEST_DUP passed $FD_N specs"
