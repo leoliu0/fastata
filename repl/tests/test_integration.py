@@ -135,7 +135,7 @@ def test_verify_arm(root):
     assert r2["verdict"] == "FAIL" and r2["counts"]["DIFF"] == 0, r2
     assert r2["mismatches"] == ["egen: injected: m differs"]
     md = report.render("calls")
-    assert "verify mismatches: 1" in md and "|dataverse-VBAD|egen: injected: m differs|" in md
+    assert "verify mismatches: 1" in md and "|dataverse-VBAD|egen|1|" in md and "injected" not in md
 
     # verify again without rerunning arm A
     a_before = state.stage(ok, "run_A")

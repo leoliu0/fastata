@@ -155,7 +155,8 @@ def missing_dir(text: str, arm_root: Path, cwd: Path) -> str | None:
 
 def fetch_urls(pkg: str, patches: list[dict], log=print) -> list[dict]:
     """Downloads the files patches read from the web into <pkg>/_deps/urls (the runs have no
-    network); drops a patch whose download fails, so the line stays as the package wrote it."""
+    network); drops a patch whose download fails, so the line stays as the package wrote it.
+    The URLs come from package code: only public hosts are fetched (net.download_public)."""
     from . import net
     from .patching import url_dest
 
@@ -168,7 +169,7 @@ def fetch_urls(pkg: str, patches: list[dict], log=print) -> list[dict]:
             if dest.exists():
                 continue
             try:
-                net.download(url, dest)
+                net.download_public(url, dest)
             except Exception as e:  # noqa: BLE001 - the run then fails as it would have
                 log(f"{pkg}: could not download {url}: {e}")
                 ok = False

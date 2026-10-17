@@ -30,7 +30,7 @@ import subprocess
 from collections import Counter
 from pathlib import Path
 
-from . import paths, provenance, sandbox, state
+from . import paths, provenance, safefs, sandbox, state
 from .patching import apply_patches, load_meta
 from .stataparse import REPLACED
 
@@ -175,11 +175,12 @@ def _empty_calls() -> dict:
     return {**{k: 0 for k in KINDS}, "last_reason": "", "reasons": Counter(), "skipped": Counter(), "mismatches": []}
 
 
-def aggregate_calls(path: Path) -> dict[str, dict]:
+def aggregate_calls(path: Path | None) -> dict[str, dict]:
     """Per command: counts of fast, fallback and verify_* lines, fallback and skip reasons, and
-    the details of every verify mismatch (FASTATA_COUNTS lines are cmd,kind,detail)."""
+    the details of every verify mismatch (FASTATA_COUNTS lines are cmd,kind,detail). path: the
+    arm's counts file as safefs.regular_file() returns it (None: no calls)."""
     out: dict[str, dict] = {c: _empty_calls() for c in REPLACED}
-    if not path.exists():
+    if path is None or not path.exists():
         return out
     with open(path, newline="", errors="replace") as f:
         for row in csv.reader(f):
@@ -260,7 +261,9 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
     changed_path(pkg, arm).unlink(missing_ok=True)
     patched = apply_patches(root, meta)
     for d in meta.get("mkdirs", []):
-        (root / d).mkdir(parents=True, exist_ok=True)
+        md = safefs.contained_dir(root, d)
+        if md is not None:
+            md.mkdir(parents=True, exist_ok=True)
     (root / PERSONAL).mkdir()
     deps = deps_dir(pkg)
     (deps / "plus").mkdir(parents=True, exist_ok=True)
@@ -282,7 +285,7 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
         ro.append(paths.FASTATA_STATA)
         (home / "_fxrepl_setup.do").write_text(setup_text())
         r = sandbox.stata_batch(home / "_fxrepl_setup.do", cwd=home, home=home, rw=[root], ro=ro, timeout=600)
-        slog = (home / "_fxrepl_setup.log").read_text(errors="replace") if (home / "_fxrepl_setup.log").exists() else ""
+        slog = safefs.read_text(home, "_fxrepl_setup.log")
         if slog:
             shutil.copy2(home / "_fxrepl_setup.log", res / f"arm_{arm}_setup.log")
         if "fastata: enabled; Stata loads it at startup through" not in slog or "on now:      yes" not in slog:
@@ -297,13 +300,14 @@ def run_arm(pkg: str, arm: str, force: bool = False, log=print) -> dict:
     log(f"{pkg}: arm {arm} running")
     r = sandbox.stata_batch(root / WRAPPER, cwd=root, home=home, rw=[root], ro=ro, env=env,
                             timeout=TIMEOUT_MIN[arm] * 60)
-    wlog = root / WRAPPER_LOG
-    text = wlog.read_text(errors="replace") if wlog.exists() else ""
-    if wlog.exists():
+    # outputs of the package's code: read only as regular files below root (safefs)
+    wlog = safefs.regular_file(root, WRAPPER_LOG)
+    text = wlog.read_text(errors="replace") if wlog else ""
+    if wlog:
         shutil.copy2(wlog, res / f"arm_{arm}.log")
     info["seconds"] = round(r.seconds, 1)
     if arm in FASTATA_ARMS:
-        agg = aggregate_calls(root / CALLS)
+        agg = aggregate_calls(safefs.regular_file(root, CALLS))
         write_counts_csv(agg, res / f"fastata_counts_{arm}.csv")
         info["counts"] = calls_info(agg)
     if any(ln.startswith(NO_VERIFY + ":") for ln in text.splitlines()):

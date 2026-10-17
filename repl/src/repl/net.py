@@ -221,6 +221,62 @@ def _download_segments(url: str, dest: Path, part: Path, size: int, md5: str | N
     return size
 
 
+MAX_PUBLIC_BYTES = 2 << 30
+
+
+def public_url(url: str) -> bool:
+    """An http(s) URL without credentials whose host resolves only to public addresses (not
+    localhost, private, shared, link-local or reserved ones)."""
+    import ipaddress
+    import socket
+
+    u = urlparse(url)
+    if u.scheme not in ("http", "https") or not u.hostname or u.username or u.password:
+        return False
+    try:
+        infos = socket.getaddrinfo(u.hostname, u.port or (443 if u.scheme == "https" else 80),
+                                   proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    try:
+        return bool(infos) and all(ipaddress.ip_address(sa[0].split("%")[0]).is_global for *_, sa in infos)
+    except ValueError:
+        return False
+
+
+def download_public(url: str, dest: Path, *, max_bytes: int = MAX_PUBLIC_BYTES, redirects: int = 5) -> int:
+    """download() for a URL that package code names (a do-file reading a file from the web):
+    every hop, redirects included, must pass public_url(), so the host never fetches from its
+    own network for a package. Raises RuntimeError otherwise. Returns the byte count."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    part = dest.with_name(dest.name + ".part")
+    for _ in range(redirects + 1):
+        if not public_url(url):
+            raise RuntimeError(f"not a public http(s) URL: {url}")
+        r = get(url, stream=True, timeout=600, allow_redirects=False)
+        if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+            r.close()
+            url = urljoin(url, r.headers.get("Location", ""))
+            continue
+        r.raise_for_status()
+        n = 0
+        try:
+            with open(part, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    n += len(chunk)
+                    if n > max_bytes:
+                        raise RuntimeError(f"more than {max_bytes} bytes at {url}")
+                    f.write(chunk)
+        except BaseException:
+            part.unlink(missing_ok=True)
+            raise
+        finally:
+            r.close()
+        part.replace(dest)
+        return n
+    raise RuntimeError(f"more than {redirects} redirects from {url}")
+
+
 class RangeError(RuntimeError):
     """The server does not answer byte-range requests."""
 

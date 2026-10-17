@@ -31,7 +31,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from . import paths, runner, sandbox, state
+from . import paths, runner, safefs, sandbox, state
 
 TEXT_EXT = {".log", ".smcl", ".txt", ".tex", ".csv", ".md", ".html", ".htm", ".rtf", ".xml", ".out", ".tab"}
 SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".eps", ".ps", ".svg", ".gph", ".wmf", ".emf", ".tif",
@@ -39,6 +39,7 @@ SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".eps", ".ps", ".svg", ".gp
 EXCEL_EXT = {".xls", ".xlsx"}
 TOL = 1e-9
 WRAPPER_ID = "<wrapper log>"
+NONREG = "not a regular file (symbolic link or special file); not read"
 
 _MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
 _NORMS = [
@@ -220,14 +221,21 @@ def kind_of(rel: str) -> str:
 changed_files = runner.changed_files
 
 
-def _read_side(pkg: str, arm: str, rel: str) -> tuple[Path | None, str]:
+def _read_side(pkg: str, arm: str, rel: str) -> tuple[Path | None, str, bool]:
+    """(the file to read, None when absent; the arm directory; True when something other than a
+    regular file is there, which is never read on the host: see safefs)."""
     root = runner.arm_dir(pkg, arm)
-    if rel == WRAPPER_ID:
-        return root / runner.WRAPPER_LOG, str(root)
-    p = root / rel
-    if not p.exists() and runner.changed_path(pkg, arm).exists() and rel not in changed_files(pkg, arm):
-        p = paths.pkg_dir(pkg) / "src" / rel  # pruned arm: the run left this file as it was
-    return (p if p.exists() else None), str(root)
+    name = runner.WRAPPER_LOG if rel == WRAPPER_ID else rel
+    p = safefs.regular_file(root, name)
+    if p is not None:
+        return p, str(root), False
+    if safefs.exists_nonregular(root, name):
+        return None, str(root), True
+    if rel != WRAPPER_ID and runner.changed_path(pkg, arm).exists() and rel not in changed_files(pkg, arm):
+        src = paths.pkg_dir(pkg) / "src"  # pruned arm: the run left this file as it was
+        p = safefs.regular_file(src, rel)
+        return p, str(root), p is None and safefs.exists_nonregular(src, rel)
+    return None, str(root), False
 
 
 def cmp_dta_batch(pkg: str, pairs: list[tuple[str, Path, Path]]) -> dict[str, tuple[str, str]]:
@@ -261,10 +269,13 @@ def compare_pairs(pkg: str, x: str, y: str, files: list[str]) -> dict[str, tuple
     dta: list[tuple[str, Path, Path]] = []
     for rel in files:
         k = kind_of(rel)
-        px, rx = _read_side(pkg, x, rel)
-        py, ry = _read_side(pkg, y, rel)
+        px, rx, nx = _read_side(pkg, x, rel)
+        py, ry, ny = _read_side(pkg, y, rel)
         if k == "skip":
             out[rel] = ("SKIP", "")
+            continue
+        if nx or ny:
+            out[rel] = ("SKIP", NONREG)
             continue
         if px is None or py is None:
             out[rel] = ("SAME", "absent in both") if px is None and py is None else (
@@ -389,7 +400,7 @@ def compare(pkg: str, force: bool = False, arm: str = "V") -> dict:
         if kind_of(f) == "text" and ab[f][0] not in ("SAME", "ERR") and af[f][0] != "ERR":
             texts, roots = {}, {}
             for a in ("A", arm, ref):
-                p, roots[a] = _read_side(pkg, a, f)
+                p, roots[a], _ = _read_side(pkg, a, f)
                 texts[a] = p.read_text(errors="replace") if p else ""
                 if f == WRAPPER_ID:
                     texts[a] = runner.log_region(texts[a]) or ""
