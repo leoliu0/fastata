@@ -459,9 +459,19 @@ program Fast
 	if "`fcn'" == "tag" local otype byte
 
 	* ---- the output with its label and notes, as the original (a Break waits until all are
-	* done), then the messages
+	* done), then the messages. egen.ado prints the missing values after the function returns,
+	* except where the function's own gen printed them: _gstd labels the variable after that
+	* gen, so std's message comes before its label (which may print Stata's truncation note)
+	local fx_msg
+	if "`fcn'" != "tag" & `fx_nmiss' > 0 {
+		local s = cond(`fx_nmiss' > 1, "s", "")
+		local N : di %11.0fc `fx_nmiss'
+		local N `N'
+		local fx_msg "(`N' missing value`s' generated)"
+	}
 	nobreak {
 		_fx store `fx_token' `otype' `name'
+		if "`fcn'" == "std" & "`fx_msg'" != "" di in bl "`fx_msg'"
 		if "`fcn'" == "group" {
 			local varlist `varlist'
 			if udstrlen("group(`varlist')") > 80 {
@@ -481,7 +491,9 @@ program Fast
 			if "`field'`track'" != "" local space " "
 			local by2
 			if "`by'" != "" local by2 = `"by `by'"'
-			label var `name' "`field'`track'`space'rank of `exp' `by2'"
+			* quietly: _grank labels inside quietly {}, so a label beyond 80 characters is
+			* truncated without Stata's note
+			quietly label var `name' "`field'`track'`space'rank of `exp' `by2'"
 		}
 		else if "`fcn'" == "std" {
 			gettoken newexp empty : exp, match(pp)
@@ -508,12 +520,7 @@ program Fast
 		* the original's _pctile prints this as text, not as an error
 		di as txt "no observations"
 	}
-	if "`fcn'" != "tag" & `fx_nmiss' > 0 {
-		local s = cond(`fx_nmiss' > 1, "s", "")
-		local N : di %11.0fc `fx_nmiss'
-		local N `N'
-		di in bl "(`N' missing value`s' generated)"
-	}
+	if "`fcn'" != "std" & "`fx_msg'" != "" di in bl "`fx_msg'"
 	* verify mode: how the comparison with the original treats the new variable, "<tol> <name>":
 	* within tol, the accumulation-class tolerance (help fastata) for sums whose order follows
 	* the random tie order of the original's sort by the by() variables, and without the sign of

@@ -173,8 +173,8 @@ original's.
 
 {pstd}
 {cmd:fastata} uses all processors of your Stata/MP licence, or all logical processors with
-Stata/SE and Stata/BE, and fewer on small data (one per 65,536 observations). Results do not
-depend on the number of processors.
+Stata/SE and Stata/BE, and fewer on small data, where starting a thread would cost more than
+it saves. Results do not depend on the number of processors.
 
 {pstd}
 {cmd:fastata} replaces the commands through Stata's ado-path: {cmd:fastata on} puts a

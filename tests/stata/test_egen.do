@@ -260,6 +260,14 @@ te "egen v = rank(x1+0) , by( g )" fast
 te "egen v = std( (x1) )" fast
 te "egen v = std(((x2)))" fast
 te "egen v = std(x1 + x2) if u > .5, by(g)" fast base 1.2e-7
+* a label beyond 80 characters and missing values: std's own gen prints the missing values,
+* then its label prints Stata's truncation note; rank labels quietly (no note) and egen.ado
+* prints the missing values after it
+local lx x1 + x2 + x1*x2 + x1*x1 + x2*x2 + 3*x1 + 4*x2 + 5*x1*x2 + 6*x1 - 7*x2
+te "egen v = std(`lx') if u > .5" fast
+te "egen v = std(`lx') if u > .5, by(g)" fast base 1.2e-7
+te "egen v = rank(`lx') if u > .5" fast
+te "egen v = rank(`lx') if u > .5, by(g) field" fast
 te "egen v = median(x1) if x1 > 1e9" fast
 te "egen v = iqr(x1) if x2 >= ." fast
 te "egen v = pctile(x2) in 1/1, p(20)" fast
